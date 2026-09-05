@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>影视简报观点工作台</title>
+<style>
+:root{--ink:#202938;--muted:#667085;--paper:#eef1f5;--panel:#ffffff;--line:#d5dbe4;--deep:#243247;--accent:#3f6282;--soft:#f5f7fa;--shadow:0 12px 28px rgba(31,44,61,.07)}
+*{box-sizing:border-box} html{scroll-behavior:smooth} body{margin:0;background:var(--paper);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",sans-serif}
+button,input{font:inherit} button{cursor:pointer} .app{min-height:100vh;display:grid;grid-template-columns:238px minmax(0,1fr)}
+.side{position:sticky;top:0;height:100vh;padding:28px 18px 22px;background:var(--deep);color:#f7f3ea;display:flex;flex-direction:column}
+.brand{padding:0 8px 25px;border-bottom:1px solid rgba(255,255,255,.12);font:700 20px/1.2 "STSong","SimSun",serif;letter-spacing:.12em}
+.periods{flex:1 1 auto;min-height:0;margin-top:24px;padding:0 4px 10px 0;display:grid;align-content:start;gap:8px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable} .period{width:100%;border:0;background:transparent;color:#b9c5c0;text-align:left;border-radius:4px;padding:13px 13px 13px 30px;position:relative;line-height:1.35}
+.periods{scrollbar-width:thin;scrollbar-color:#617187 transparent}.periods::-webkit-scrollbar{width:6px}.periods::-webkit-scrollbar-thumb{background:#617187;border-radius:6px}.periods::-webkit-scrollbar-track{background:transparent}
+.period:before{content:"";position:absolute;left:13px;top:50%;width:5px;height:5px;border-radius:50%;background:#718096;transform:translateY(-50%)}
+.period:hover{background:rgba(255,255,255,.06);color:#fff} .period.active{background:#f5f7fa;color:var(--deep);font-weight:700}
+.period.active:before{background:var(--accent)} .period b{display:block;font-size:14px;margin-bottom:3px} .period small{font-size:11px;opacity:.72;font-weight:400}
+.side-foot{margin-top:auto;padding:18px 8px 0;border-top:1px solid rgba(255,255,255,.10);color:#91a0b4;font-size:11px;line-height:1.7}
+.main{min-width:0} .topbar{height:68px;background:rgba(255,255,255,.94);border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 34px;position:sticky;top:0;z-index:10;backdrop-filter:blur(10px)}
+.topbar strong{font-size:15px;letter-spacing:.08em} .search{margin-left:auto;width:min(330px,42vw)} .search input{width:100%;border:1px solid #cbd3df;background:#f8fafc;padding:9px 13px;border-radius:3px;outline:none;color:var(--ink)}
+.search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(63,98,130,.11)} .page{max-width:1060px;margin:0 auto;padding:40px 42px 72px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:25px;padding-bottom:19px;border-bottom:1px solid var(--line)} h1{font:700 32px/1.2 "STSong","SimSun",serif;letter-spacing:.04em;margin:0}
+.meta{color:var(--muted);font-size:13px} .stance-tabs{display:flex;align-items:flex-end;gap:28px;margin:-8px 0 24px;border-bottom:1px solid var(--line)} .stance-tab{display:flex;align-items:baseline;gap:7px;border:0;border-bottom:2px solid transparent;background:transparent;color:#758093;padding:12px 2px 11px;font-size:14px;font-weight:700;white-space:nowrap} .stance-tab small{font:11px/1 "Microsoft YaHei","PingFang SC",sans-serif;color:#9aa4b2;font-weight:400} .stance-tab:hover{color:#34465c} .stance-tab.active{color:#2f5679;border-bottom-color:var(--accent)} .stance-tab.active small{color:#607d98} .stance-tab[data-stance="negative"].active{color:#765354;border-bottom-color:#916c6e} .content{display:grid;gap:24px} .cluster{position:relative;background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);overflow:hidden}
+.cluster:before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--accent)} .cluster-head{position:relative;padding:24px 72px 20px 34px;cursor:pointer;user-select:none}
+.cluster-no{position:absolute;right:24px;top:21px;color:#d2d9e3;font:700 28px/1 Georgia,serif} .cluster-title{font:700 19px/1.55 "STSong","SimSun",serif;color:#26364b}
+.cluster-count{margin-top:7px;color:var(--muted);font-size:12px} .samples{border-top:1px solid #e1e6ed;padding:14px 28px 22px 34px;display:grid;gap:8px}
+.sample{display:grid;grid-template-columns:132px minmax(0,1fr);gap:16px;border:1px solid #dde3eb;background:#fbfcfe;padding:13px 14px}
+.source-meta{font-size:12px;color:var(--muted);line-height:1.55} .source-meta .channel{display:block;color:#405f7b;font-weight:700;margin-bottom:5px}
+.source-author{color:#465366;font-weight:700;word-break:break-word} .source-date{margin-top:3px;color:#8a94a4;font-size:11px} .excerpt{font-size:13.5px;line-height:1.78;color:#3f4a5a}
+.sample-actions{display:flex;gap:12px;align-items:center;margin-top:8px} .text-btn,.source-link{border:0;background:none;padding:0;color:var(--accent);font-size:12px;text-decoration:none}
+.text-btn:hover,.source-link:hover{text-decoration:underline} .fulltext{display:none;margin-top:11px;padding:12px 14px;background:#f3f6fa;border-left:2px solid #9cb0c4;color:#526072;font-size:12.5px;line-height:1.72;white-space:pre-wrap;max-height:340px;overflow:auto}
+.fulltext.open{display:block} .more{display:block;margin:10px auto 0;border:1px solid #cbd3df;background:#f8fafc;color:#46566a;border-radius:3px;padding:8px 15px}
+.hidden-sample{display:none} .cluster.collapsed .samples{display:none} .empty{padding:54px;text-align:center;color:var(--muted);background:var(--panel);border:1px solid var(--line)} mark{background:#dbe8f5;color:inherit;padding:0 .06em}
+@media(max-width:800px){.app{grid-template-columns:1fr}.side{position:relative;height:auto;padding:20px}.periods{grid-template-columns:repeat(3,1fr);margin-top:16px;padding:0;overflow:visible;scrollbar-gutter:auto}.period{padding:10px 8px;text-align:center}.period:before,.side-foot{display:none}.topbar{padding:0 18px}.page{padding:28px 16px 50px}.stance-tabs{gap:22px;overflow-x:auto}.cluster-head{padding:22px 62px 18px 24px}.samples{padding:12px 18px 18px 24px}.sample{grid-template-columns:1fr;gap:8px}}
+@media(max-width:540px){.periods{grid-template-columns:1fr}.search{width:52vw}.page-head{align-items:center}h1{font-size:26px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side"><div class="brand">影视简报</div><div class="periods" id="periods"></div><div class="side-foot">观点工作台</div></aside>
+  <main class="main">
+    <header class="topbar"><strong>观点工作台</strong><label class="search"><input id="search" type="search" placeholder="搜索观点、作者或正文"></label></header>
+    <div class="page"><div class="page-head"><h1 id="batchTitle"></h1><div class="meta" id="batchMeta"></div></div><nav class="stance-tabs" id="stanceTabs" aria-label="观点立场"></nav><section class="content" id="content"></section></div>
+  </main>
+</div>
+<script>
+const DATA=@@FILM_BRIEF_DATA@@;
+const STANCES=[['positive','正面'],['objective','客观'],['negative','负面']];
+let current=0; let query=""; let activeStance='positive';
+const periods=document.getElementById('periods');
+const batchTitle=document.getElementById('batchTitle');
+const batchMeta=document.getElementById('batchMeta');
+const search=document.getElementById('search');
+const stanceTabs=document.getElementById('stanceTabs');
+const content=document.getElementById('content');
+const E=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function highlight(text){const safe=E(text);if(!query)return safe;const needle=E(query).toLowerCase();const lower=safe.toLowerCase();let out='',pos=0,hit=-1;while((hit=lower.indexOf(needle,pos))>=0){out+=safe.slice(pos,hit)+`<mark>${safe.slice(hit,hit+needle.length)}</mark>`;pos=hit+needle.length;}return out+safe.slice(pos);}
+function renderPeriods(){periods.innerHTML=DATA.batches.map((b,i)=>`<button class="period ${i===current?'active':''}" data-i="${i}"><b>${E(b.name)}</b><small>${b.count} 条样本 · ${b.clusterCount} 个观点簇</small></button>`).join('');}
+function sampleHtml(item,index){const hidden=index>=5?' hidden-sample':'';return `<article class="sample${hidden}" data-search="${E((item.author+' '+item.title+' '+item.excerpt+' '+item.body).toLowerCase())}"><div class="source-meta"><span class="channel">${E(item.channel)}</span><div class="source-author">${highlight(item.author)}</div><div class="source-date">${E(item.publishedAt)}</div></div><div><div class="excerpt">${highlight(item.excerpt)}</div><div class="sample-actions"><button class="text-btn" data-full>展开原文</button>${item.url?`<a class="source-link" href="${E(item.url)}" target="_blank" rel="noreferrer">打开来源</a>`:''}</div><div class="fulltext">${highlight(item.body)}</div></div></article>`;}
+function clusterHtml(cluster,index){const visible=cluster.items.filter(x=>!query||(x.author+' '+x.title+' '+x.excerpt+' '+x.body).toLowerCase().includes(query));if(!visible.length)return '';return `<section class="cluster" data-cluster="${E(cluster.id)}"><div class="cluster-head"><div class="cluster-no">${String(index+1).padStart(2,'0')}</div><div class="cluster-title">${highlight(cluster.title)}</div><div class="cluster-count">${visible.length} 条样本</div></div><div class="samples">${visible.map(sampleHtml).join('')}${visible.length>5?`<button class="more" data-more>展开其余 ${visible.length-5} 条</button>`:''}</div></section>`;}
+function availableStances(batch){return STANCES.filter(([key])=>batch.clusters.some(c=>(c.stance||'objective')===key));}
+function ensureActiveStance(batch){const keys=availableStances(batch).map(([key])=>key);if(!keys.includes(activeStance))activeStance=keys[0]||'positive';}
+function renderStanceTabs(batch){stanceTabs.innerHTML=availableStances(batch).map(([key,label])=>{const clusters=batch.clusters.filter(c=>(c.stance||'objective')===key);const count=clusters.reduce((sum,c)=>sum+c.count,0);return `<button class="stance-tab ${key===activeStance?'active':''}" data-stance="${key}"><span>${label}</span><small>${count} 条样本 · ${clusters.length} 个观点簇</small></button>`;}).join('');}
+function stanceClusters(batch){let index=0;const cards=batch.clusters.filter(c=>(c.stance||'objective')===activeStance).map(c=>clusterHtml(c,index++)).filter(Boolean);return cards.join('');}
+function render(){const batch=DATA.batches[current];ensureActiveStance(batch);batchTitle.textContent=batch.name;batchMeta.textContent=`${batch.count} 条样本 · ${batch.clusterCount} 个观点簇`;renderStanceTabs(batch);content.innerHTML=stanceClusters(batch)||'<div class="empty">当前分类没有匹配样本</div>';renderPeriods();}
+periods.addEventListener('click',e=>{const b=e.target.closest('[data-i]');if(!b)return;current=Number(b.dataset.i);activeStance='positive';query='';search.value='';render();});
+stanceTabs.addEventListener('click',e=>{const b=e.target.closest('[data-stance]');if(!b)return;activeStance=b.dataset.stance;render();});
+search.addEventListener('input',e=>{query=e.target.value.trim().toLowerCase();render();document.querySelectorAll('.hidden-sample').forEach(x=>x.classList.remove('hidden-sample'));document.querySelectorAll('[data-more]').forEach(x=>x.remove());});
+content.addEventListener('click',e=>{const full=e.target.closest('[data-full]');if(full){const box=full.closest('.sample').querySelector('.fulltext');box.classList.toggle('open');full.textContent=box.classList.contains('open')?'收起原文':'展开原文';return;}const more=e.target.closest('[data-more]');if(more){more.closest('.samples').querySelectorAll('.hidden-sample').forEach(x=>x.classList.remove('hidden-sample'));more.remove();return;}const head=e.target.closest('.cluster-head');if(head)head.parentElement.classList.toggle('collapsed');});
+render();
+</script>
+</body></html>

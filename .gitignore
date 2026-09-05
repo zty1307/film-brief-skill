@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.tmp
+workflow.lock
+workflow_manifest.json
+workflow_status.json
+reviews/
+review_templates/
+run/
+extract/
+config/
+*.html.merge-verification.json
