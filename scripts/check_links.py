@@ -5,6 +5,7 @@ import json
 import re
 import socket
 import ssl
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -171,6 +172,23 @@ def main() -> None:
                 })
 
     results = []
+    progress_path = args.output.with_suffix(args.output.suffix + ".progress.json")
+    started = time.monotonic()
+
+    def write_progress(status: str) -> None:
+        payload = {
+            "status": status,
+            "completed": len(results),
+            "total": len(references),
+            "elapsed_seconds": round(time.monotonic() - started, 1),
+            "output": str(args.output.resolve()),
+        }
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = progress_path.with_suffix(progress_path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(progress_path)
+
+    write_progress("RUNNING")
     with ThreadPoolExecutor(max_workers=max(1, min(args.workers, 16))) as pool:
         futures = {pool.submit(check_one, url, args.timeout): url for url in references}
         for future in as_completed(futures):
@@ -181,6 +199,8 @@ def main() -> None:
                 result = {"url": url, "classification": "indeterminate", "status_code": None, "checked_at": datetime.now(timezone.utc).isoformat(), "reason": type(exc).__name__, "error": clean(exc)[:300]}
             result["references"] = references[result["url"]]
             results.append(result)
+            if len(results) == len(references) or len(results) % max(10, len(references) // 20 or 1) == 0:
+                write_progress("RUNNING")
 
     results.sort(key=lambda item: item["url"])
     counts = {}
@@ -195,6 +215,7 @@ def main() -> None:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_progress("COMPLETE")
     print(json.dumps({"urls": len(results), "counts": counts, "output": str(args.output.resolve())}, ensure_ascii=False, indent=2))
 
 

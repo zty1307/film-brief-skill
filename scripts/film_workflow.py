@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ REVIEW_FILES = {
     "members": "cluster_member_semantic_reviews.json",
     "excerpts": "excerpt_reviews.json",
     "semantic": "final_excerpt_semantic_reviews.json",
+    "post_count": "post_excerpt_cluster_count_reviews.json",
 }
 
 LEGACY_CONFIG_KEYS = {
@@ -50,6 +52,15 @@ LEGACY_CONFIG_KEYS = {
     "cluster_target_count",
 }
 
+ALLOWED_CLUSTER_EXCLUSION_REASONS = {
+    "out_of_scope",
+    "no_reportable_viewpoint",
+    "cross_work_mismatch",
+    "abusive_non_viewpoint",
+    "promotion_only",
+    "duplicate_or_corrupt",
+}
+
 STAGE_GUIDANCE = {
     "period_config": [
         "逐批次确认 serial_drama 或 episodic_variety，并填写真实监测时间窗",
@@ -58,7 +69,7 @@ STAGE_GUIDANCE = {
     ],
     "source_review": [
         "逐条阅读队列中的完整标题、正文、ASR及必要父帖上下文，不凭标题或关键词单独判断",
-        "保留必须同时有目标作品、可报告判断和具体依据；用连续逐字证据或候选字符位置",
+        "retain 与 exclude 都必须填写具体理由，并提供 evidence 或 evidence_position 指向本来源逐字原文",
         "相同观点的独立作者均可保留；综艺还须核对最新一期、前一期当周突出话题或节目级讨论",
     ],
     "dedup_review": [
@@ -72,7 +83,8 @@ STAGE_GUIDANCE = {
     ],
     "cluster_assignment_review": [
         "逐条核对目标作品、评价方面、当前片段立场和连续逐字证据",
-        "片段有效但归错簇时应移动、缩窄簇名或建立有数据支持的新簇；不得因初次归错直接删除",
+        "cluster_overrides.json 是累计文件；控制器会合并此前已通过记录，当前同ID提交优先",
+        "片段有效但归错簇时应移动、缩窄簇名或建立有数据支持的新簇；明确跨剧、无观点、攻击噪声或纯推广可用 cluster=__exclude__ 并给逐字证据",
         "同一来源进入第二簇时，两段原文必须互不重叠且分别形成完整观点",
     ],
     "cluster_set_review": [
@@ -84,6 +96,11 @@ STAGE_GUIDANCE = {
         "必须由未参与本轮簇命名的第二个AI或清空前轮上下文后的独立轮次完成",
         "只判断最终簇名、最终立场与当前分配片段是否一致，并提供片段中的连续逐字证据",
         "只有人物名或题材词重合、没有表达同一判断时必须退回，不能勉强填写 pass",
+    ],
+    "cluster_member_repair": [
+        "逐条读取成员独立复核退回项；先判断应移动来源、缩窄簇标题、拆分真实观点或从展示层排除",
+        "有效观点优先改入能被片段直接支持的现有簇；只有数据确实形成新命题时才新增簇",
+        "修改 cluster_definitions 或累计 cluster_overrides 后重新 advance；不得把独立复核的 fail 直接改写为 pass",
     ],
     "excerpt_review": [
         "最多选择同一来源中按原顺序出现的两个逐字片段，不改写、不补字、不调换顺序",
@@ -98,6 +115,11 @@ STAGE_GUIDANCE = {
     "render_repair": [
         "逐项读取 render_failures.json，回到对应来源修复摘录、归簇或复核字段",
         "不得删除失败队列、伪造通过字段或直接调用底层 render 绕过门槛",
+    ],
+    "post_excerpt_count_review": [
+        "只审核终审 drop 之后实际仍有展示样本的一级观点簇数量和颗粒度",
+        "不要回改终审前 cluster_count，也不要为进入9至16机械合并、拆分或补造观点",
+        "按输入指纹填写实际簇数；越界时如实批准并说明继续调整会损害哪项语义质量",
     ],
 }
 
@@ -185,6 +207,10 @@ def clean(value: object) -> str:
     return " ".join(str(value or "").split()).strip()
 
 
+def normalized(value: object) -> str:
+    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", clean(value)).lower()
+
+
 def exact_key(value: object) -> str:
     """Trim outer whitespace while preserving the tab separators used by review keys."""
     return str(value or "").strip(" \r\n")
@@ -268,6 +294,10 @@ def paths_for(manifest: dict) -> dict[str, Path]:
         "reviews": review_dir,
         "templates": workspace / "review_templates",
         "output": Path(manifest["output"]).resolve(),
+        "source_validation": workspace / "run" / "source_review_validation.json",
+        "override_validation": workspace / "run" / "cluster_override_validation.json",
+        "override_ledger": workspace / "run" / "cluster_overrides.ledger.json",
+        "override_effective": workspace / "run" / "cluster_overrides.effective.json",
         **{key: review_dir / name for key, name in REVIEW_FILES.items()},
     }
 
@@ -288,10 +318,35 @@ def run_command(command: list[str], cwd: Path | None = None, allow_review_stop: 
         "stderr": completed.stderr[-12000:],
         "finished_at": now(),
     }
-    if completed.returncode and not allow_review_stop:
-        diagnostic = completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
-        message = next((line.strip() for line in reversed(diagnostic.splitlines()) if line.strip()), diagnostic)
-        raise RuntimeError(message)
+    structured = None
+    for candidate in (completed.stdout.strip(), completed.stderr.strip()):
+        if not candidate:
+            continue
+        try:
+            value = json.loads(candidate)
+            if isinstance(value, dict):
+                structured = value
+                break
+        except json.JSONDecodeError:
+            continue
+    if structured is not None:
+        result["business_payload"] = structured
+    if completed.returncode:
+        known_business_stop = bool(
+            allow_review_stop
+            and structured
+            and clean(structured.get("status")) in {"REVIEW_REQUIRED", "FAIL", "BLOCKED"}
+        )
+        if not known_business_stop:
+            diagnostic = completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
+            if structured:
+                message = json.dumps(structured, ensure_ascii=False)
+            else:
+                message = next(
+                    (line.strip() for line in reversed(diagnostic.splitlines()) if line.strip()),
+                    diagnostic,
+                )
+            raise RuntimeError(message)
     return result
 
 
@@ -338,6 +393,213 @@ def list_review_map(payload: dict | None, key_field: str) -> dict[str, dict]:
             if isinstance(item, dict) and clean(item.get(key_field)):
                 result[clean(item[key_field])] = item
     return result
+
+
+def cluster_override_validation_issues(
+    retained_sources: list[dict], cluster_payload: dict, override_payload: dict
+) -> list[dict]:
+    """Validate user-correctable override contract errors before clustering.
+
+    The pipeline still performs the authoritative semantic checks.  This fast
+    controller preflight prevents a malformed AI review from surfacing as a
+    generic BROKEN state after a full cluster run.
+    """
+    sources = {clean(row.get("id")): row for row in retained_sources if clean(row.get("id"))}
+    known_clusters = {
+        clean(batch): {clean(item.get("id")) for item in items if isinstance(item, dict)}
+        for batch, items in (cluster_payload.get("batches") or {}).items()
+        if isinstance(items, list)
+    }
+    overrides = override_payload.get("overrides", {})
+    if not isinstance(overrides, dict):
+        return [{"source_id": "", "issue": "overrides_not_object", "required_fix": "overrides 必须为对象"}]
+    issues: list[dict] = []
+    for source_id, review in overrides.items():
+        source_id = clean(source_id)
+        if source_id not in sources:
+            issues.append({"source_id": source_id, "issue": "unknown_source_id", "required_fix": "删除非当前保留池来源，或从最新模板重新填写"})
+            continue
+        if not isinstance(review, dict):
+            issues.append({"source_id": source_id, "issue": "override_not_object", "required_fix": "该来源的归簇修正必须为对象"})
+            continue
+        if not clean(review.get("reason")):
+            issues.append({"source_id": source_id, "issue": "missing_reason", "required_fix": "填写当前来源专属 reason"})
+        cluster_id = clean(review.get("cluster"))
+        if cluster_id == "__exclude__":
+            reason_code = clean(review.get("exclude_reason_code"))
+            if reason_code not in ALLOWED_CLUSTER_EXCLUSION_REASONS:
+                issues.append({
+                    "source_id": source_id,
+                    "issue": "invalid_exclude_reason_code",
+                    "required_fix": "exclude_reason_code 必须取 allowed_reason_codes 中的一项",
+                    "allowed_reason_codes": sorted(ALLOWED_CLUSTER_EXCLUSION_REASONS),
+                })
+            evidence = clean(review.get("exclusion_evidence") or review.get("evidence"))
+            row = sources[source_id]
+            own = clean(row.get("body")) or clean(row.get("asr")) or clean(row.get("title"))
+            title = clean(row.get("title"))
+            source_text = own if row.get("post_type") in {"评论", "转帖"} else clean(
+                (title + " " + own) if title and normalized(title) not in normalized(own) else own
+            )
+            if not evidence:
+                issues.append({
+                    "source_id": source_id,
+                    "issue": "missing_exclusion_evidence",
+                    "required_fix": "填写 exclusion_evidence；也兼容 evidence，内容必须是本来源全文的连续逐字子串",
+                })
+            elif evidence not in source_text:
+                issues.append({
+                    "source_id": source_id,
+                    "issue": "exclusion_evidence_not_verbatim",
+                    "required_fix": "从该来源全文原样复制连续文字到 exclusion_evidence，不得概括、改写或规范化标点",
+                    "submitted_evidence": evidence,
+                })
+            continue
+        batch = clean(sources[source_id].get("batch"))
+        if not cluster_id or cluster_id not in known_clusters.get(batch, set()):
+            issues.append({
+                "source_id": source_id,
+                "issue": "unknown_cluster",
+                "required_fix": f"cluster 必须是批次 {batch} 的现有簇 ID，或使用 __exclude__",
+                "submitted_cluster": cluster_id,
+            })
+        secondary = clean(review.get("secondary_cluster"))
+        if secondary and (secondary == cluster_id or secondary not in known_clusters.get(batch, set())):
+            issues.append({
+                "source_id": source_id,
+                "issue": "invalid_secondary_cluster",
+                "required_fix": "secondary_cluster 必须是同批次中不同于主簇的现有簇 ID",
+                "submitted_cluster": secondary,
+            })
+        row = sources[source_id]
+        own = clean(row.get("body")) or clean(row.get("asr")) or clean(row.get("title"))
+        title = clean(row.get("title"))
+        full_text = own if row.get("post_type") in {"评论", "转帖"} else clean(
+            (title + " " + own) if title and normalized(title) not in normalized(own) else own
+        )
+        for prefix in ("", "secondary_"):
+            fragment_key = f"{prefix}passage_fragments"
+            position_key = f"{prefix}passage_positions"
+            fragments = review.get(fragment_key)
+            positions = review.get(position_key)
+            if fragments is None and positions is None:
+                continue
+            if prefix and not secondary:
+                issues.append({
+                    "source_id": source_id,
+                    "issue": "secondary_passage_without_secondary_cluster",
+                    "required_fix": "只有填写 secondary_cluster 时才能提交 secondary_passage_fragments/positions",
+                })
+                continue
+            if not isinstance(fragments, list) or not isinstance(positions, list):
+                issues.append({
+                    "source_id": source_id,
+                    "issue": f"{prefix}passage_fragments_positions_incomplete",
+                    "required_fix": f"{fragment_key} 与 {position_key} 必须同时填写为数组",
+                })
+                continue
+            if not 1 <= len(fragments) <= 2 or len(fragments) != len(positions):
+                issues.append({
+                    "source_id": source_id,
+                    "issue": f"{prefix}passage_fragments_positions_count_invalid",
+                    "required_fix": "归簇证据只允许一至两段，片段数与位置数必须一致",
+                })
+                continue
+            previous_end = 0
+            for index, (fragment, position) in enumerate(zip(fragments, positions)):
+                if not isinstance(fragment, str) or not fragment:
+                    issues.append({
+                        "source_id": source_id,
+                        "issue": f"{prefix}passage_fragment_invalid",
+                        "fragment_index": index,
+                        "required_fix": "片段必须是非空的原文字符串",
+                    })
+                    continue
+                if not isinstance(position, list) or len(position) != 2 or any(not isinstance(value, int) for value in position):
+                    issues.append({
+                        "source_id": source_id,
+                        "issue": f"{prefix}passage_position_invalid",
+                        "fragment_index": index,
+                        "required_fix": "每个位置必须是整数 [start, end]",
+                    })
+                    continue
+                start, end = position
+                if start < previous_end or start < 0 or end < start or end > len(full_text):
+                    issues.append({
+                        "source_id": source_id,
+                        "issue": f"{prefix}passage_position_out_of_order_or_range",
+                        "fragment_index": index,
+                        "required_fix": "位置必须在本来源全文内按原顺序排列且互不重叠",
+                    })
+                    continue
+                if full_text[start:end] != fragment:
+                    issues.append({
+                        "source_id": source_id,
+                        "issue": f"{prefix}passage_fragment_not_verbatim_at_position",
+                        "fragment_index": index,
+                        "required_fix": "按指定 start/end 从本来源全文逐字复制片段，不得改写或改标点",
+                    })
+                previous_end = end
+    return issues
+
+
+def cluster_override_map(payload: dict | None) -> dict[str, dict]:
+    if not payload:
+        return {}
+    values = payload.get("overrides", {})
+    return {
+        clean(key): value
+        for key, value in values.items()
+        if clean(key) and isinstance(value, dict)
+    } if isinstance(values, dict) else {}
+
+
+def cumulative_override_payload(
+    workflow_id: str,
+    input_paths: list[Path],
+    current: dict | None,
+    ledger_path: Path,
+) -> dict:
+    """Merge prior accepted overrides with the current AI submission.
+
+    The current submission wins for duplicate source IDs.  A stale ledger is
+    ignored, so records can never leak across changed retained pools or cluster
+    definitions.
+    """
+    merged: dict[str, dict] = {}
+    if ledger_path.exists():
+        ledger = read_json(ledger_path)
+        if not binding_issue(ledger, workflow_id, input_paths):
+            merged.update(cluster_override_map(ledger))
+    merged.update(cluster_override_map(current))
+    return {
+        "scope": "current_period_source_cluster_reviews",
+        "_workflow": binding(workflow_id, input_paths),
+        "contract": {
+            "cumulative_file": True,
+            "current_same_id_wins": True,
+            "normal_cluster_fields": [
+                "cluster", "reason", "anchor_terms", "passage_stance", "target_evidence",
+                "passage_fragments", "passage_positions",
+            ],
+            "two_span_passage": {
+                "optional_fields": ["passage_fragments", "passage_positions"],
+                "rule": "provide both; one or two verbatim spans in source order, non-overlapping",
+                "secondary_fields": ["secondary_passage_fragments", "secondary_passage_positions"],
+            },
+            "display_exclusion": {
+                "cluster": "__exclude__",
+                "required_fields": ["exclude_reason_code", "reason", "exclusion_evidence_or_evidence"],
+                "accepted_evidence_fields": ["exclusion_evidence", "evidence"],
+                "evidence_rule": "continuous verbatim substring of this source full text",
+                "allowed_reason_codes": [
+                    "out_of_scope", "no_reportable_viewpoint", "cross_work_mismatch",
+                    "abusive_non_viewpoint", "promotion_only", "duplicate_or_corrupt",
+                ],
+            },
+        },
+        "overrides": merged,
+    }
 
 
 def pair_key(left: object, right: object) -> str:
@@ -466,6 +728,12 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         ensure_template(template, {
             "scope": "current_period_source_fulltext_reviews",
             "_workflow": binding(workflow_id, source_inputs),
+            "contract": {
+                "allowed_decisions": ["retain_core", "retain_consensus", "exclude"],
+                "required_for_every_decision": ["source_id", "decision", "reason", "evidence_or_evidence_position"],
+                "evidence_position_basis": "input_item.evidence_source_text",
+                "exact_copy_group": "review the representative once; select propagates the result to copy_group_source_ids",
+            },
             "reviews": [],
         })
         if issue or missing:
@@ -475,10 +743,32 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
                 binding_issue=issue, required=len(required_ids), completed=len(required_ids & set(reviewed)), missing=len(missing),
             )
 
+        validation_inputs = source_inputs + [PIPELINE, CONTROLLER]
+        validation_token = digest_paths(validation_inputs)
+        if not stage_fresh(manifest, "source_review_validation", validation_token, [p["source_validation"]]):
+            return result(
+                "READY_TO_ADVANCE", "source_review_validation",
+                "来源复核覆盖齐备，可以一次性校验全部决定、证据位置和综艺期次字段",
+                action="source_review_validation", input_digest=validation_token,
+            )
+        validation = read_json(p["source_validation"])
+        if clean(validation.get("status")) != "PASS":
+            return result(
+                "REVIEW_REQUIRED", "source_review", "来源复核契约未通过；一次修复报告中的全部来源",
+                required_file=str(p["source"]), validation_file=str(p["source_validation"]),
+                issue_count=int(validation.get("issue_count", 0)),
+                affected_source_ids=validation.get("affected_source_ids", []),
+            )
+
     links_token = digest_paths([p["run"] / "normalized_sources.jsonl", LINK_CHECKER, CONTROLLER])
     link_health = p["run"] / "source_link_health.json"
     if not stage_fresh(manifest, "link_check", links_token, [link_health]):
-        return result("READY_TO_ADVANCE", "link_check", "来源语义复核齐备，可以执行链接健康检查", action="link_check", input_digest=links_token)
+        return result(
+            "READY_TO_ADVANCE", "link_check",
+            "来源语义复核齐备，可以执行链接健康检查；大量链接可能耗时数分钟",
+            action="link_check", input_digest=links_token,
+            progress_file=str(link_health.with_suffix(link_health.suffix + ".progress.json")),
+        )
 
     selection_inputs = [p["run"] / "normalized_sources.jsonl", p["run"] / "source_decisions.auto.jsonl", link_health, PIPELINE, CONTROLLER]
     if p['source'].exists():
@@ -555,35 +845,63 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
 
     override_inputs = [p["run"] / "retained_sources.jsonl", p["clusters"]]
     override_template = p['templates'] / 'cluster_overrides.template.json'
-    ensure_template(override_template, {'scope': 'current_period_source_cluster_reviews', '_workflow': binding(workflow_id, override_inputs), 'overrides': {}})
     overrides_payload = review_payload(p["overrides"])
+    cumulative_overrides = cumulative_override_payload(
+        workflow_id, override_inputs, overrides_payload, p["override_ledger"]
+    )
+    ensure_template(override_template, cumulative_overrides)
     if overrides_payload is not None:
         override_issue = binding_issue(overrides_payload, workflow_id, override_inputs)
         if override_issue:
             return result("REVIEW_REQUIRED", "cluster_assignment_review", "cluster_overrides.json 与当前保留池或簇定义不一致", required_file=str(p["overrides"]), template=str(override_template), input_files=[str(x) for x in override_inputs], binding_issue=override_issue)
+        override_validation_issues = cluster_override_validation_issues(
+            read_jsonl(p["run"] / "retained_sources.jsonl"),
+            read_json(p["clusters"]),
+            cumulative_overrides,
+        )
+        write_json(p["override_validation"], {
+            "status": "PASS" if not override_validation_issues else "REVIEW_REQUIRED",
+            "issue_count": len(override_validation_issues),
+            "issues": override_validation_issues,
+        })
+        if override_validation_issues:
+            return result(
+                "REVIEW_REQUIRED", "cluster_assignment_review",
+                "归簇修正存在可直接修复的格式或逐字证据问题；已一次列出全部问题",
+                required_file=str(p["overrides"]), template=str(override_template),
+                input_files=[str(x) for x in override_inputs],
+                validation_file=str(p["override_validation"]),
+                validation_issue_count=len(override_validation_issues),
+                validation_issues=override_validation_issues,
+            )
 
     cluster_base_inputs = [p["run"] / "retained_sources.jsonl", p["clusters"], PIPELINE, CONTROLLER]
     if p["overrides"].exists():
         cluster_base_inputs.append(p["overrides"])
+    if p["override_ledger"].exists():
+        cluster_base_inputs.append(p["override_ledger"])
     cluster_base_token = digest_paths(cluster_base_inputs)
     if not stage_fresh(manifest, "cluster_base", cluster_base_token, [
         p["run"] / "cluster_set_review_input.json",
         p["run"] / "cluster_count_review_input.json",
         p["run"] / "cluster_review_queue.jsonl",
+        p["run"] / "cluster_exclusions.jsonl",
     ]):
         return result("READY_TO_ADVANCE", "cluster_base", "观点簇定义已就绪，可以生成首次归簇和复核队列", action="cluster_base", input_digest=cluster_base_token)
 
     low_queue = read_jsonl(p["run"] / "cluster_review_queue.jsonl")
     if low_queue:
-        overrides = (overrides_payload or {}).get("overrides", {})
+        cumulative_overrides = cumulative_override_payload(
+            workflow_id, override_inputs, overrides_payload, p["override_ledger"]
+        )
+        overrides = cumulative_overrides.get("overrides", {})
         override_ids = set(overrides) if isinstance(overrides, dict) else set()
         low_ids = {clean(item.get("source_id")) for item in low_queue}
         template = p["templates"] / "cluster_overrides.template.json"
-        ensure_template(template, {
-            "scope": "current_period_source_cluster_reviews",
-            "_workflow": binding(workflow_id, override_inputs),
-            "overrides": {},
-        })
+        # Refresh this template on every residual queue.  It is intentionally
+        # cumulative so another model cannot erase prior rounds by submitting
+        # only the current queue.
+        write_json(template, cumulative_overrides)
         return result(
             "REVIEW_REQUIRED", "cluster_assignment_review", "逐条修正低置信度归簇；对象、方面、立场和逐字证据必须同时对齐",
             required_file=str(p["overrides"]), template=str(template), input_file=str(p["run"] / "cluster_review_queue.jsonl"),
@@ -617,6 +935,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         p["run"] / "cluster_member_semantic_review_input.json",
         p["run"] / "cluster_set_review_queue.unresolved.jsonl",
         p["run"] / "cluster_count_review_queue.unresolved.jsonl",
+        p["run"] / "cluster_exclusions.jsonl",
     ]):
         return result("READY_TO_ADVANCE", "cluster_set", "集合审查齐备，可以生成独立成员级语义复核输入", action="cluster_set", input_digest=cluster_set_token)
 
@@ -656,6 +975,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         p["run"] / "cluster_count_review_queue.unresolved.jsonl",
         p["run"] / "cluster_member_semantic_review_queue.unresolved.jsonl",
         p["run"] / "workbench_order_audit.json",
+        p["run"] / "cluster_exclusions.jsonl",
     ]):
         return result("READY_TO_ADVANCE", "cluster_final", "成员复核齐备，可以固化最终归簇", action="cluster_final", input_digest=cluster_final_token)
 
@@ -666,7 +986,31 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         "cluster_members": len(read_jsonl(p["run"] / "cluster_member_semantic_review_queue.unresolved.jsonl")),
     }
     if any(unresolved.values()):
-        return result("BLOCKED", "cluster_final", "最终归簇仍有未决项，禁止进入页面生成", unresolved=unresolved)
+        if unresolved["assignment"]:
+            return result(
+                "REVIEW_REQUIRED", "cluster_assignment_review",
+                "最终归簇仍有对象、方面或立场未对齐项；按队列修正累计归簇文件",
+                required_file=str(p["overrides"]), template=str(override_template),
+                input_file=str(p["run"] / "cluster_review_queue.jsonl"), unresolved=unresolved,
+            )
+        if unresolved["cluster_set"] or unresolved["cluster_count"]:
+            return result(
+                "REVIEW_REQUIRED", "cluster_set_review",
+                "最终归簇使集合或簇数审查失效；按当前指纹重新完成审查",
+                required_file=str(p["set"]),
+                input_files=[str(p["run"] / "cluster_set_review_queue.unresolved.jsonl"), str(p["run"] / "cluster_count_review_queue.unresolved.jsonl")],
+                unresolved=unresolved,
+            )
+        return result(
+            "REVIEW_REQUIRED", "cluster_member_repair",
+            "独立成员复核退回了部分归簇；根据逐条理由修正簇定义或累计归簇后重新推进",
+            required_file=str(p["overrides"]), template=str(override_template),
+            input_file=str(p["run"] / "cluster_member_semantic_review_queue.unresolved.jsonl"),
+            cluster_definitions_file=str(p["clusters"]),
+            member_review_file=str(p["members"]),
+            repair_choices=["move_with_cluster_overrides", "narrow_or_split_cluster_definitions", "evidenced_display_exclusion"],
+            unresolved=unresolved,
+        )
 
     render_probe_inputs = [p["run"] / "clustered_items.json", WORKBENCH_TEMPLATE, PIPELINE, CONTROLLER]
     excerpt_template = p['templates'] / 'excerpt_reviews.template.json'
@@ -691,6 +1035,14 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         ensure_template(template, {
             "scope": "current_period_final_excerpt_semantic_reviews",
             "_workflow": binding(workflow_id, semantic_inputs),
+            "contract": {
+                "evidence_scopes_are_in_each_input_item": True,
+                "target_evidence": "raw_excerpt",
+                "work_consistency_evidence": "raw_excerpt",
+                "aspect_evidence": "cleaned_excerpt",
+                "stance_evidence": "cleaned_excerpt",
+                "specific_support_evidence": "cleaned_excerpt",
+            },
             "reviews": {},
         })
         excerpt_template = p["templates"] / "excerpt_reviews.template.json"
@@ -707,8 +1059,28 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         )
 
     render_final_inputs = render_probe_inputs + [p["semantic"]]
+    post_count_input = p["run"] / "post_excerpt_cluster_count_review_input.json"
+    if p["post_count"].exists():
+        post_count_issue = binding_issue(
+            review_payload(p["post_count"]), workflow_id, [post_count_input]
+        ) if post_count_input.exists() else "missing_post_excerpt_count_input"
+        if post_count_issue:
+            template = p["templates"] / "post_excerpt_cluster_count_reviews.template.json"
+            ensure_template(template, {
+                "scope": "current_period_post_excerpt_cluster_count_reviews",
+                "_workflow": binding(workflow_id, [post_count_input]) if post_count_input.exists() else {},
+                "reviews": {},
+            })
+            return result(
+                "REVIEW_REQUIRED", "post_excerpt_count_review",
+                "后置簇数复核与当前终审结果不一致",
+                required_file=str(p["post_count"]), template=str(template),
+                input_file=str(post_count_input), binding_issue=post_count_issue,
+            )
+        render_final_inputs.append(p["post_count"])
     render_final_token = digest_paths(render_final_inputs)
-    if not stage_fresh(manifest, "render_final", render_final_token, [p["run"] / "render_summary.json", p["output"]]):
+    render_summary_path = p["run"] / "render_summary.json"
+    if not stage_fresh(manifest, "render_final", render_final_token, [render_summary_path]):
         previous_render = manifest.get("stages", {}).get("render_final", {})
         previous_output_sha = clean(previous_render.get("output_sha256"))
         if p["output"].exists() and not previous_output_sha:
@@ -725,12 +1097,37 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             )
         return result("READY_TO_ADVANCE", "render_final", "最终摘录复核齐备，可以生成独立工作台", action="render_final", input_digest=render_final_token)
 
-    render_summary = read_json(p["run"] / "render_summary.json")
+    render_summary = read_json(render_summary_path)
     if clean(render_summary.get("status")) != "RENDERED" or not p["output"].exists():
         failures = read_json(p["run"] / "render_failures.json").get("failures", []) if (p["run"] / "render_failures.json").exists() else []
+        if clean(render_summary.get("stage")) == "post_excerpt_cluster_count_review" and post_count_input.exists():
+            template = p["templates"] / "post_excerpt_cluster_count_reviews.template.json"
+            template_payload = {
+                "scope": "current_period_post_excerpt_cluster_count_reviews",
+                "_workflow": binding(workflow_id, [post_count_input]),
+                "contract": {
+                    "required": ["fingerprint", "decision=pass", "cluster_count", "range_status", "reader_load_reviewed=true", "no_forced_merge_or_split=true", "reason"],
+                    "out_of_range_extra": ["exception_approved=true", "exception_reason"],
+                },
+                "reviews": {},
+            }
+            ensure_template(template, template_payload)
+            return result(
+                "REVIEW_REQUIRED", "post_excerpt_count_review",
+                "终审改变了实际非空观点簇数，请按终审后结果完成一次后置数量复核",
+                required_file=str(p["post_count"]), template=str(template),
+                input_file=str(post_count_input), failure_count=len(failures),
+            )
         return result(
             "REVIEW_REQUIRED", "render_repair", "页面未通过最终生成门槛；按失败项重截、重归簇或更新复核后再次 advance",
             render_summary=render_summary, failures_file=str(p["run"] / "render_failures.json"), failure_count=len(failures),
+        )
+    saved_output_hash = manifest.get("stages", {}).get("render_final", {}).get("output_hashes", {}).get(str(p["output"].resolve()))
+    if not saved_output_hash or saved_output_hash != sha256(p["output"]):
+        return result(
+            "BLOCKED", "output_modified",
+            "目标 HTML 与本轮 render_final 记录不一致；禁止继续验收",
+            existing_output=str(p["output"]),
         )
 
     verify_inputs = [p["output"], p["run"] / "workbench_dataset.json", p["run"] / "excerpt_provenance.json", PIPELINE, CONTROLLER]
@@ -805,6 +1202,13 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
             p["run"] / "prepare_summary.json",
             p["run"] / "source_review_queue.jsonl",
         ]
+    elif action == "source_review_validation":
+        command = [
+            sys.executable, str(PIPELINE), "validate-source-reviews",
+            "--run", str(p["run"]), "--reviews", str(p["source"]),
+        ]
+        result = run_command(command, allow_review_stop=True)
+        outputs = [p["source_validation"]]
     elif action == "link_check":
         command = [sys.executable, str(LINK_CHECKER), "--input", str(p["run"] / "normalized_sources.jsonl"), "--output", str(p["run"] / "source_link_health.json"), "--workers", str(workers), "--timeout", str(timeout)]
         result = run_command(command)
@@ -824,24 +1228,39 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
         ]
     elif action in {"cluster_base", "cluster_set", "cluster_final"}:
         command = [sys.executable, str(PIPELINE), "cluster", "--run", str(p["run"]), "--clusters", str(p["clusters"])]
-        if p["overrides"].exists():
-            command += ["--overrides", str(p["overrides"])]
+        effective_overrides = None
+        override_inputs = [p["run"] / "retained_sources.jsonl", p["clusters"]]
+        if p["overrides"].exists() or p["override_ledger"].exists():
+            effective_overrides = cumulative_override_payload(
+                manifest["workflow_id"], override_inputs,
+                review_payload(p["overrides"]), p["override_ledger"],
+            )
+            write_json(p["override_effective"], effective_overrides)
+            command += ["--overrides", str(p["override_effective"])]
         if action in {"cluster_set", "cluster_final"}:
             command += ["--set-reviews", str(p["set"])]
         if action == "cluster_final":
             command += ["--member-reviews", str(p["members"])]
         result = run_command(command)
+        if effective_overrides is not None:
+            # Commit only after the cluster command accepts every merged record.
+            # Keeping the user-facing file cumulative prevents cross-model
+            # replacement of earlier review rounds.
+            write_json(p["override_ledger"], effective_overrides)
+            write_json(p["overrides"], effective_overrides)
         if action == "cluster_base":
             outputs = [
                 p["run"] / "cluster_set_review_input.json",
                 p["run"] / "cluster_count_review_input.json",
                 p["run"] / "cluster_review_queue.jsonl",
+                p["run"] / "cluster_exclusions.jsonl",
             ]
         elif action == "cluster_set":
             outputs = [
                 p["run"] / "cluster_member_semantic_review_input.json",
                 p["run"] / "cluster_set_review_queue.unresolved.jsonl",
                 p["run"] / "cluster_count_review_queue.unresolved.jsonl",
+                p["run"] / "cluster_exclusions.jsonl",
             ]
         else:
             outputs = [
@@ -852,6 +1271,7 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
                 p["run"] / "cluster_count_review_queue.unresolved.jsonl",
                 p["run"] / "cluster_member_semantic_review_queue.unresolved.jsonl",
                 p["run"] / "workbench_order_audit.json",
+                p["run"] / "cluster_exclusions.jsonl",
             ]
     elif action in {"render_probe", "render_final"}:
         command = [sys.executable, str(PIPELINE), "render", "--run", str(p["run"]), "--output", str(p["output"])]
@@ -859,15 +1279,22 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
             command += ["--excerpt-reviews", str(p["excerpts"])]
         if action == "render_final":
             command += ["--semantic-reviews", str(p["semantic"])]
-        result = run_command(command, allow_review_stop=(action == "render_probe"))
+            if p["post_count"].exists():
+                command += ["--post-count-reviews", str(p["post_count"])]
+        result = run_command(command, allow_review_stop=True)
         if action == "render_final" and p["output"].exists():
             result["output_sha256"] = sha256(p["output"])
         outputs = [p["run"] / "excerpt_semantic_review_input.jsonl"]
         if action == "render_final":
-            outputs = [p["run"] / "render_summary.json", p["output"]]
+            outputs = [
+                p["run"] / "render_summary.json",
+                p["run"] / "post_excerpt_cluster_count_review_input.json",
+                p["run"] / "post_excerpt_cluster_count_review_audit.json",
+                p["output"],
+            ]
     elif action == "verify":
         command = [sys.executable, str(PIPELINE), "verify", "--run", str(p["run"]), "--output", str(p["output"])]
-        result = run_command(command)
+        result = run_command(command, allow_review_stop=True)
         outputs = [p["run"] / "verification.json"]
     else:
         raise ValueError(f"未知 action：{action}")

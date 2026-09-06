@@ -15,7 +15,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
-from urllib.parse import urlparse
 
 
 CHANNEL_PRIORITY = {"境内新闻": 5, "公众文章": 4, "今日头条": 3, "微博": 2, "小红书": 1, "抖音": 0}
@@ -25,6 +24,24 @@ SOCIAL_CHANNELS = {"微博", "小红书"}
 ALLOWED_DECISIONS = {"retain_core", "retain_consensus", "exclude"}
 ALLOWED_CLUSTER_STANCES = {"positive", "objective", "negative"}
 ALLOWED_CLUSTER_REPORT_ROLES = {"report_point", "subtopic", "data_note", "rare_signal"}
+ALLOWED_CLUSTER_EXCLUSION_REASONS = {
+    "out_of_scope",
+    "no_reportable_viewpoint",
+    "cross_work_mismatch",
+    "abusive_non_viewpoint",
+    "promotion_only",
+    "duplicate_or_corrupt",
+}
+CLUSTER_ASSIGNMENT_ISSUE_GUIDANCE = {
+    "passage_stance_conflict": "当前片段立场与簇不一致；重选原文窗口、移动到同立场簇，或对明确无可用观点项使用有证据的 __exclude__",
+    "negative_cluster_missing_negative_cue": "自动词表未确认负向；阅读全文后若确为负向，填写 passage_stance=negative 和逐字证据即可",
+    "small_top_two_margin": "前两簇接近；按完整判断机制选择更精确簇，并用 anchor_terms 锁定支撑句",
+    "no_positive_cluster_evidence": "当前窗口没有足够簇证据；重选含判断和具体依据的窗口，或转簇/有证据排除",
+    "low_cluster_evidence": "当前窗口与簇标题的语义证据较弱；阅读全文后重选、转簇或有证据排除",
+    "multi_work_passage_requires_review": "同段涉及多作品；必须用 target_evidence 明确当前判断属于哪部作品",
+    "no_passage_target_anchor": "局部片段未重复作品名；用同来源逐字 target_evidence 建立归属，并用 anchor_terms 指向评价句",
+    "passage_aspect_mismatch": "当前片段没有支持簇标题的评价方面；重选、转簇或有证据排除",
+}
 ALLOWED_OBJECTIVE_SUBTYPES = {"neutral_fact", "sentiment_distribution", "balanced_observation"}
 DRAMA_CLUSTER_SCOPES = {"pre_broadcast_expectation", "current_broadcast_reaction", "later_reputation", "mixed_time_explicit"}
 VARIETY_CLUSTER_SCOPES = {"latest_episode", "previous_episode_prominent", "program_level_current", "mixed_scope_explicit"}
@@ -83,6 +100,18 @@ EPISODE_RECAP = re.compile(r"^(?:《?[^》]{0,20}》?)?第[一二三四五六七
 QUESTION = re.compile(r"值得入坑吗|求看了的人|有人看吗|到底要不要|怎么样[？?]|好看吗[？?]|谁看了")
 GENERIC_ONLY = re.compile(r"^(?:演得|演员演得)?(?:真)?(?:挺|很|太|非常)?(?:好|不错|真实|好看|难看|一般|喜欢|期待|失望)[!！。,.，\s]*$|^(?:支持|不支持|必须追|追起来|期待开播|收视长虹)[!！。,.，\s]*$")
 RISK = re.compile(r"下架|停更|撤档|网盘|夸克|百度云|磁力|盗版|番位|撕番|口碑崩|扑街|差评|抵制|热度低")
+ABUSIVE_REVIEW_RISK = re.compile(
+    r"走狗|汉奸|卖国贼|滚出中国|去死|不得好死|脑残|智障|畜生|狗东西|贱人|婊子|垃圾人|"
+    r"地域黑|排外|仇恨|人身攻击"
+)
+ENTITY_MENTION_PATTERNS = (
+    re.compile(r"(?:尽管|虽然)?([\u4e00-\u9fff]{2,4})(?=的角色|饰演|扮演|不是传统)"),
+    re.compile(r"([\u4e00-\u9fff]{2,4})与([\u4e00-\u9fff]{2,4})(?=的关系)"),
+    re.compile(
+        r"(?:男主角|女主角|男主|女主|前男友|前女友)\s*[：:，,]?\s*"
+        r"(?!的|角|光环|角色|设定)([\u4e00-\u9fff]{2,4})(?=[，。；、与的\s])"
+    ),
+)
 PIRACY = re.compile(r"百度(?:云|网盘)?[：:]?\s*(?:网页)?链接|夸克(?:[：:]?\s*(?:网页)?链接|资源)|网盘资源|磁力链接|资源下载|在线观看地址")
 FACT_WARNING = re.compile(r"\d+(?:\.\d+)?(?:万|亿|集|%|％)|收视|热度|市占率|排名|第一|下架|撤档|停播")
 LEADING_FRAGMENT = re.compile(r"^(?:而且|并且|同时|此外|另外|其次|所以|因此|但|但是|不过|然而|可|也|还|更|再|这|他|她|它|其|其中|对此)[，、\s]?")
@@ -213,6 +242,11 @@ def display_excerpt_has_markup(value: object) -> bool:
         or unicodedata.category(char) in {"So", "Sk"}
         for char in text
     )
+
+
+def unbalanced_display_quotes(value: object) -> bool:
+    text = clean(value)
+    return text.count("“") != text.count("”") or text.count("‘") != text.count("’")
 
 
 def promotion_review_markers(value: object) -> list[str]:
@@ -503,11 +537,18 @@ def parse_datetime(value: object) -> datetime | None:
 
 def filename_period(name: str) -> tuple[datetime | None, datetime | None]:
     match = re.search(r"(\d{4}\.\d{2}\.\d{2}) (\d{2})_(\d{2})至(\d{4}\.\d{2}\.\d{2}) (\d{2})_(\d{2})", name)
-    if not match:
-        return None, None
-    start = datetime.strptime(" ".join(match.group(1, 2, 3)), "%Y.%m.%d %H %M")
-    end = datetime.strptime(" ".join(match.group(4, 5, 6)), "%Y.%m.%d %H %M").replace(second=59)
-    return start, end
+    if match:
+        start = datetime.strptime(" ".join(match.group(1, 2, 3)), "%Y.%m.%d %H %M")
+        end = datetime.strptime(" ".join(match.group(4, 5, 6)), "%Y.%m.%d %H %M").replace(second=59)
+        return start, end
+    date_only = re.search(r"(\d{4}[.-]\d{2}[.-]\d{2})至(\d{4}[.-]\d{2}[.-]\d{2})", name)
+    if date_only:
+        start = datetime.strptime(date_only.group(1).replace("-", "."), "%Y.%m.%d")
+        end = datetime.strptime(date_only.group(2).replace("-", "."), "%Y.%m.%d").replace(
+            hour=23, minute=59, second=59
+        )
+        return start, end
+    return None, None
 
 
 def period_state(row: dict, config: dict) -> tuple[str, str]:
@@ -531,6 +572,33 @@ def source_text(row: dict) -> str:
         return own
     title = clean(row.get("title"))
     return clean((title + " " + own) if title and normalized(title) not in normalized(own) else own)
+
+
+def suspicious_unconfigured_entities(text: str, auxiliary_terms: list[str]) -> list[str]:
+    """Find role-linked names that are absent from the configured work entities.
+
+    This is deliberately a review router, not an exclusion rule.  It catches the
+    common wrong-work pattern where one target title is pasted onto a synopsis
+    about several characters from another work.
+    """
+    configured = {normalized(term) for term in auxiliary_terms if len(normalized(term)) >= 2}
+    generic = {
+        "角色", "人物", "观众", "演员", "部分", "传统", "这种", "男女", "男女主角",
+        "男主", "女主", "剧情", "感情", "关系", "其他配角", "重要男性角色",
+    }
+    found = set()
+    for pattern in ENTITY_MENTION_PATTERNS:
+        for match in pattern.findall(text):
+            values = match if isinstance(match, tuple) else (match,)
+            for value in values:
+                candidate = re.sub(r"^(?:尽管|虽然|但是|只是|但)", "", clean(value))
+                key = normalized(candidate)
+                if candidate in generic or len(key) < 2:
+                    continue
+                if any(key == known or key in known or known in key for known in configured):
+                    continue
+                found.add(candidate)
+    return sorted(found)
 
 
 def target_layers(target: dict) -> tuple[list[str], list[str], list[str], list[str]]:
@@ -740,6 +808,14 @@ def evaluate(row: dict, target: dict, config: dict) -> dict:
     local_derived_viewpoint = bool(derived_candidates)
     comparison_near_target = bool(best_local and best_local["comparison_hits"])
     target_mentions = sum(text.count(term) for term in strong_terms + weak_terms if len(term) >= 2)
+    unknown_entities = suspicious_unconfigured_entities(text, auxiliary_terms)
+    entity_consistency_risk = bool(
+        target_mentions <= 2
+        and len(normalized(text)) >= 100
+        and not auxiliary_hits
+        and len(unknown_entities) >= 2
+    )
+    abusive_review_risk = bool(ABUSIVE_REVIEW_RISK.search(text))
     target_is_late_minor_section = bool(
         strong_positions
         and not title_strong_hits
@@ -877,6 +953,11 @@ def evaluate(row: dict, target: dict, config: dict) -> dict:
         and reviewable_target_context
         and possible_viewpoint
     )
+    # These two signals never delete automatically.  They force a full-text AI
+    # check so a pasted work title, wrong character set, or abusive aside cannot
+    # silently pass the deterministic gate.
+    if entity_consistency_risk or abusive_review_risk:
+        needs_review = True
     if clean(target.get("content_mode")) == "episodic_variety" and text and reason not in clear_exclusion_reasons:
         # 周更综艺必须先判断期次。脚本只控制监测日期，不能凭人物名或话题词可靠区分最新一期与往期。
         needs_review = True
@@ -922,6 +1003,9 @@ def evaluate(row: dict, target: dict, config: dict) -> dict:
         "target_is_late_minor_section": target_is_late_minor_section,
         "target_is_sparse_secondary_section": target_is_sparse_secondary_section,
         "comparison_near_target": comparison_near_target,
+        "entity_consistency_risk": entity_consistency_risk,
+        "unconfigured_role_entities": unknown_entities,
+        "abusive_content_review_risk": abusive_review_risk,
         "review_evidence_candidates": review_candidates,
         "quoted_evidence": quoted_evidence,
         "stance": stance(text),
@@ -1013,7 +1097,7 @@ def command_prepare(args: argparse.Namespace) -> None:
         runtime_targets[batch] = target
         derived_context_audit[batch] = discovered
     decisions = []
-    review_queue = []
+    review_queue_all = []
     for row in sources:
         target = runtime_targets[row["batch"]]
         result = evaluate(row, target, config)
@@ -1024,7 +1108,7 @@ def command_prepare(args: argparse.Namespace) -> None:
                 {"candidate_index": index, **candidate}
                 for index, candidate in enumerate(result.get("review_evidence_candidates", []), start=1)
             ]
-            review_queue.append({
+            review_queue_all.append({
                 **row,
                 **result,
                 "review_evidence_candidates": candidates,
@@ -1036,6 +1120,29 @@ def command_prepare(args: argparse.Namespace) -> None:
                     if clean(target.get("content_mode")) == "episodic_variety" else ""
                 ),
             })
+    # Exact copies need one source-level semantic judgment.  `select` later
+    # propagates that judgment across the exact-copy family and still audits
+    # every original source ID.  Similar opinions with different wording are
+    # untouched and remain independent review items.
+    exact_review_groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for item in review_queue_all:
+        exact_review_groups[(item["batch"], normalized(source_text(item)))].append(item)
+    review_queue = []
+    for group in exact_review_groups.values():
+        representative = max(group, key=lambda item: (
+            int(item.get("media_authority_rank", 0)),
+            CHANNEL_PRIORITY.get(item.get("channel", ""), 0),
+            float(item.get("quality", 0)),
+            len(normalized(source_text(item))),
+            item["id"],
+        ))
+        review_queue.append({
+            **representative,
+            "copy_group_source_ids": sorted(item["id"] for item in group),
+            "copy_group_size": len(group),
+            "copy_group_basis": "exact_normalized_source_text",
+        })
+    review_queue.sort(key=lambda item: (item["batch"], item["id"]))
     write_jsonl(run_dir / "normalized_sources.jsonl", sources)
     write_jsonl(run_dir / "out_of_period_sources.jsonl", out_of_period)
     write_jsonl(run_dir / "source_decisions.auto.jsonl", decisions)
@@ -1050,6 +1157,8 @@ def command_prepare(args: argparse.Namespace) -> None:
         "batches": dict(Counter(row["batch"] for row in sources)),
         "auto_decisions": dict(Counter(row["auto_decision"] for row in decisions)),
         "ai_review_queue": len(review_queue),
+        "ai_review_queue_before_exact_copy_collapse": len(review_queue_all),
+        "exact_copy_review_items_saved": len(review_queue_all) - len(review_queue),
         "card_files_read": 0,
         "historical_report_fields_read": 0,
         "input_sha256": sha256(records_path),
@@ -1186,6 +1295,70 @@ def resolve_source_review_evidence(review: dict, row: dict) -> tuple[str, list[i
     return "", None
 
 
+def source_review_validation_issues(
+    sources: dict[str, dict],
+    queue: list[dict],
+    reviews: dict[str, dict],
+    period_config: dict,
+) -> list[dict]:
+    """Collect every source-review contract error in one fast preflight."""
+    issues: list[dict] = []
+    queue_ids = {clean(row.get("id")) for row in queue}
+    for source_id in sorted(queue_ids - set(reviews)):
+        issues.append({"source_id": source_id, "issue": "missing_review"})
+    for source_id in sorted(set(reviews) - set(sources)):
+        issues.append({"source_id": source_id, "issue": "unknown_source"})
+    for source_id, review in reviews.items():
+        row = sources.get(source_id)
+        if row is None:
+            continue
+        decision = clean(review.get("decision"))
+        if decision not in ALLOWED_DECISIONS:
+            issues.append({"source_id": source_id, "issue": "invalid_decision", "value": decision})
+        if not clean(review.get("reason")):
+            issues.append({"source_id": source_id, "issue": "missing_reason"})
+        try:
+            evidence, _ = resolve_source_review_evidence(review, row)
+            if not evidence:
+                issues.append({"source_id": source_id, "issue": "missing_verbatim_evidence"})
+        except ValueError as exc:
+            issues.append({"source_id": source_id, "issue": "invalid_evidence", "detail": str(exc)})
+        target_config = period_config.get("targets", {}).get(row["batch"], {})
+        if clean(target_config.get("content_mode")) == "episodic_variety":
+            episode_scope = clean(review.get("episode_scope"))
+            allowed_scopes = {"latest_episode", "previous_episode_prominent", "program_level_current", "out_of_scope"}
+            if episode_scope not in allowed_scopes:
+                issues.append({"source_id": source_id, "issue": "invalid_or_missing_episode_scope"})
+            if not clean(review.get("episode_evidence")):
+                issues.append({"source_id": source_id, "issue": "missing_episode_evidence"})
+            if episode_scope == "previous_episode_prominent" and not clean(review.get("prominence_basis")):
+                issues.append({"source_id": source_id, "issue": "missing_prominence_basis"})
+            if episode_scope == "out_of_scope" and decision != "exclude":
+                issues.append({"source_id": source_id, "issue": "out_of_scope_must_exclude"})
+    return issues
+
+
+def command_validate_source_reviews(args: argparse.Namespace) -> None:
+    run_dir = args.run.resolve()
+    sources = {row["id"]: row for row in load_jsonl(run_dir / "normalized_sources.jsonl")}
+    queue = load_jsonl(run_dir / "source_review_queue.jsonl")
+    config = load_json(run_dir / "period_config.json")
+    reviews = review_map(args.reviews, "current_period_source_fulltext_reviews") if args.reviews else {}
+    issues = source_review_validation_issues(sources, queue, reviews, config)
+    report = {
+        "status": "PASS" if not issues else "REVIEW_REQUIRED",
+        "reviewed": len(reviews),
+        "required": len({clean(row.get('id')) for row in queue}),
+        "issue_count": len(issues),
+        "affected_source_ids": sorted({clean(item.get("source_id")) for item in issues}),
+        "issues": issues,
+    }
+    write_json(run_dir / "source_review_validation.json", report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if issues:
+        raise SystemExit(1)
+
+
 def load_link_health(path: Path) -> dict[str, dict]:
     payload = load_json(path.resolve())
     if payload.get("scope") != "current_period_source_link_health":
@@ -1210,12 +1383,24 @@ def command_select(args: argparse.Namespace) -> None:
     sources = {row["id"]: row for row in load_jsonl(run_dir / "normalized_sources.jsonl")}
     auto = {row["source_id"]: row for row in load_jsonl(run_dir / "source_decisions.auto.jsonl")}
     reviews = review_map(args.reviews, "current_period_source_fulltext_reviews")
+    review_queue = load_jsonl(run_dir / "source_review_queue.jsonl")
+    review_issues = source_review_validation_issues(sources, review_queue, reviews, period_config)
+    if review_issues:
+        write_json(run_dir / "source_review_validation.json", {
+            "status": "REVIEW_REQUIRED",
+            "issue_count": len(review_issues),
+            "affected_source_ids": sorted({clean(item.get("source_id")) for item in review_issues}),
+            "issues": review_issues,
+        })
+        raise ValueError(
+            f"source_reviews 共有 {len(review_issues)} 项契约错误，详见 "
+            f"{run_dir / 'source_review_validation.json'}"
+        )
     link_health = load_link_health(args.link_health)
     expected_urls = {clean(row.get("url")) for row in sources.values() if clean(row.get("url"))}
     missing_link_checks = sorted(expected_urls - set(link_health))
     if missing_link_checks:
         raise ValueError(f"link_health 未覆盖 {len(missing_link_checks)} 个来源 URL，例如：{missing_link_checks[:3]}")
-    review_queue = load_jsonl(run_dir / "source_review_queue.jsonl")
     pending_reviews = [row for row in review_queue if row["id"] not in reviews]
     write_jsonl(run_dir / "source_review_queue.unresolved.jsonl", pending_reviews)
     unknown = set(reviews) - set(sources)
@@ -1262,9 +1447,11 @@ def command_select(args: argparse.Namespace) -> None:
     family_audit = []
     for family in families:
         reviewed = [decided_by_id[source_id] for source_id in family if source_id in reviews]
-        reviewed_states = {row["decision"] == "exclude" for row in reviewed}
+        reviewed_states = {row["decision"] for row in reviewed}
         if len(reviewed_states) > 1:
-            raise ValueError(f"同一 copy family 存在互相冲突的人工去留判断：{family[:6]}")
+            raise ValueError(
+                f"同一 copy family 存在互相冲突的人工决定 {sorted(reviewed_states)}：{family[:6]}"
+            )
         propagated = "none"
         if reviewed:
             source = reviewed[0]
@@ -1436,6 +1623,8 @@ def best_window(row: dict, definition: dict, anchor_terms: list[str] | None = No
     strong_terms, weak_terms, _, comparisons = target_layers(target_config or {})
     title_strong = term_hits(clean(row.get("title")), strong_terms)
     title_comparisons = term_hits(clean(row.get("title")), comparisons)
+    source_target_hits = term_hits(body, strong_terms + weak_terms)
+    normalized_anchors = [clean(term) for term in (anchor_terms or []) if clean(term)]
     for start in range(len(spans)):
         for end in range(start, min(len(spans), start + 2)):
             fragment = body[spans[start]["start"]:spans[end]["end"]]
@@ -1444,18 +1633,106 @@ def best_window(row: dict, definition: dict, anchor_terms: list[str] | None = No
             weak_hits = term_hits(fragment, weak_terms)
             comparison_hits = term_hits(fragment, comparisons)
             if strong_hits:
-                score += 30.0 + 5.0 * len(strong_hits)
+                score += 16.0 + 3.0 * len(strong_hits)
             elif weak_hits:
-                score += 8.0 + 2.0 * len(weak_hits)
+                score += 6.0 + 1.5 * len(weak_hits)
             elif title_strong and not title_comparisons:
-                score += 5.0
+                score += 2.0
+            elif source_target_hits:
+                # The source already establishes the work.  A later pronoun or
+                # character-led evaluative passage should not lose to an empty
+                # sentence merely because it does not repeat the title.
+                score -= 6.0
             else:
-                score -= 25.0
+                score -= 12.0
             score -= 10.0 * len(comparison_hits)
-            if anchor_terms:
-                score += sum(14.0 for term in anchor_terms if term and term in fragment)
-            candidates.append({"start": spans[start]["start"], "end": spans[end]["end"], "text": fragment, "score": round(score, 3), "hits": hits, "strong_target_hits": strong_hits, "weak_target_hits": weak_hits, "comparison_hits": comparison_hits})
-    return max(candidates, key=lambda item: (item["score"], len(item["hits"]), -item["start"])) if candidates else {"start": 0, "end": len(body), "text": body, "score": 0.0, "hits": []}
+            anchor_hits = [term for term in normalized_anchors if term in fragment]
+            if normalized_anchors:
+                score += 44.0 + 16.0 * len(anchor_hits) if anchor_hits else -24.0
+            candidates.append({"start": spans[start]["start"], "end": spans[end]["end"], "text": fragment, "score": round(score, 3), "hits": hits, "anchor_hits": anchor_hits, "strong_target_hits": strong_hits, "weak_target_hits": weak_hits, "comparison_hits": comparison_hits})
+    return max(
+        candidates,
+        key=lambda item: (
+            bool(item.get("anchor_hits")) if normalized_anchors else True,
+            len(item.get("anchor_hits", [])),
+            item["score"],
+            len(item["hits"]),
+            -item["start"],
+        ),
+    ) if candidates else {"start": 0, "end": len(body), "text": body, "score": 0.0, "hits": []}
+
+
+def reviewed_window(
+    row: dict,
+    definition: dict,
+    override: dict,
+    target_config: dict,
+    secondary: bool = False,
+) -> dict:
+    """Return an AI-selected one/two-span passage, or the scored default window.
+
+    Cluster-set and member review happen before the final excerpt stage, so a
+    non-contiguous but coherent source argument must already be representable
+    here.  Positions are authoritative and prevent a model from silently
+    joining rewritten text or skipping source order.
+    """
+    prefix = "secondary_" if secondary else ""
+    fragment_key = f"{prefix}passage_fragments"
+    position_key = f"{prefix}passage_positions"
+    anchor_key = f"{prefix}anchor_terms"
+    fragments_value = override.get(fragment_key)
+    positions_value = override.get(position_key)
+    anchors = [clean(term) for term in override.get(anchor_key, []) if clean(term)]
+    if fragments_value is None and positions_value is None:
+        return best_window(row, definition, anchors, target_config)
+    if not isinstance(fragments_value, list) or not isinstance(positions_value, list):
+        raise ValueError(f"归簇双片段必须同时填写 {fragment_key} 和 {position_key}")
+    fragments = [str(value) for value in fragments_value]
+    body = source_text(row)
+    positions = validate_fragment_positions(body, fragments, positions_value)
+    text = clean(" ".join(fragment.strip() for fragment in fragments))
+    score, hits = cluster_score(text, row.get("title", ""), definition)
+    strong_terms, weak_terms, _, comparisons = target_layers(target_config)
+    strong_hits = term_hits(text, strong_terms)
+    weak_hits = term_hits(text, weak_terms)
+    comparison_hits = term_hits(text, comparisons)
+    source_target_hits = term_hits(body, strong_terms + weak_terms)
+    title_strong = term_hits(clean(row.get("title")), strong_terms)
+    title_comparisons = term_hits(clean(row.get("title")), comparisons)
+    if strong_hits:
+        score += 16.0 + 3.0 * len(strong_hits)
+    elif weak_hits:
+        score += 6.0 + 1.5 * len(weak_hits)
+    elif title_strong and not title_comparisons:
+        score += 2.0
+    elif source_target_hits:
+        score -= 6.0
+    else:
+        score -= 12.0
+    score -= 10.0 * len(comparison_hits)
+    anchor_hits = [term for term in anchors if term in text]
+    if anchors:
+        score += 44.0 + 16.0 * len(anchor_hits) if anchor_hits else -24.0
+    return {
+        "start": positions[0][0],
+        "end": positions[-1][1],
+        "text": text,
+        "score": round(score, 3),
+        "hits": hits,
+        "anchor_hits": anchor_hits,
+        "strong_target_hits": strong_hits,
+        "weak_target_hits": weak_hits,
+        "comparison_hits": comparison_hits,
+        "fragments": fragments,
+        "positions": positions,
+        "reviewed_fragments": True,
+    }
+
+
+def windows_overlap(left: dict, right: dict) -> bool:
+    left_positions = left.get("positions") or [[left["start"], left["end"]]]
+    right_positions = right.get("positions") or [[right["start"], right["end"]]]
+    return any(max(a[0], b[0]) < min(a[1], b[1]) for a in left_positions for b in right_positions)
 
 
 def passage_alignment(
@@ -1518,9 +1795,11 @@ def passage_alignment(
             raise ValueError(f"{row['id']} 的 {stance_key} 与目标簇立场不一致")
         stance_passed, stance_basis = True, "ai_semantic_review"
     elif expected == "positive":
-        stance_passed, stance_basis = inferred == "正向", "window_stance"
+        stance_passed = inferred != "负向"
+        stance_basis = "window_stance" if inferred == "正向" else "deferred_to_independent_member_review"
     elif expected == "negative":
-        stance_passed, stance_basis = inferred == "负向", "window_stance"
+        stance_passed = inferred != "正向"
+        stance_basis = "window_stance" if inferred == "负向" else "deferred_to_independent_member_review"
     else:
         stance_passed = inferred == "混合或中性" or bool(definition.get("objective_meta"))
         stance_basis = "objective_meta" if definition.get("objective_meta") else "window_stance"
@@ -1570,10 +1849,75 @@ def cluster_set_review_fingerprint(batch: str, definition: dict, members: list[d
         "cluster_id": str(definition["id"]),
         "title": clean(definition.get("title")),
         "stance": clean(definition.get("stance")),
-        "source_ids": sorted({item["source_id"] for item in members}),
+        "members": sorted(
+            (
+                item["source_id"],
+                clean(item.get("window", {}).get("text")),
+                item.get("window", {}).get("positions", []),
+            )
+            for item in members
+        ),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def post_excerpt_count_fingerprint(batch: str, clusters: list[dict]) -> str:
+    payload = {
+        "batch": batch,
+        "clusters": [
+            {
+                "id": str(cluster.get("id")),
+                "title": clean(cluster.get("title")),
+                "stance": clean(cluster.get("stance")),
+                "view_ids": sorted(clean(item.get("viewId")) for item in cluster.get("items", [])),
+            }
+            for cluster in clusters
+        ],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def post_excerpt_count_review_map(path: Path | None) -> dict[str, dict]:
+    if path is None or not path.exists():
+        return {}
+    payload = load_json(path)
+    if payload.get("scope") != "current_period_post_excerpt_cluster_count_reviews":
+        raise ValueError("post_excerpt_count_reviews scope 错误")
+    reviews = payload.get("reviews", {})
+    if not isinstance(reviews, dict):
+        raise ValueError("post_excerpt_count_reviews.reviews 必须是对象")
+    return {clean(key): value for key, value in reviews.items() if isinstance(value, dict)}
+
+
+def post_excerpt_count_review_issues(batch: str, clusters: list[dict], review: dict | None) -> tuple[list[str], dict]:
+    cluster_count = len(clusters)
+    fingerprint = post_excerpt_count_fingerprint(batch, clusters)
+    range_status = "within_range" if 9 <= cluster_count <= 16 else "below_range" if cluster_count < 9 else "above_range"
+    audit = {"fingerprint": fingerprint, "cluster_count": cluster_count, "range_status": range_status}
+    if review is None:
+        return ["missing_review"], audit
+    issues = []
+    if clean(review.get("fingerprint")) != fingerprint:
+        issues.append("fingerprint_stale")
+    if clean(review.get("decision")) != "pass":
+        issues.append("decision_not_pass")
+    if review.get("cluster_count") != cluster_count:
+        issues.append("cluster_count_mismatch")
+    if clean(review.get("range_status")) != range_status:
+        issues.append("range_status_mismatch")
+    for field in ("reader_load_reviewed", "no_forced_merge_or_split"):
+        if review.get(field) is not True:
+            issues.append(f"{field}_missing")
+    if len(normalized(review.get("reason"))) < 12:
+        issues.append("reason_missing_or_too_short")
+    if range_status != "within_range":
+        if review.get("exception_approved") is not True:
+            issues.append("exception_approval_missing")
+        if len(normalized(review.get("exception_reason"))) < 12:
+            issues.append("exception_reason_missing_or_too_short")
+    return issues, audit
 
 
 def cluster_set_review_map(path: Path | None) -> dict[str, dict]:
@@ -1629,6 +1973,7 @@ def cluster_member_review_fingerprint(batch: str, definition: dict, member: dict
         "stance": clean(definition.get("stance")),
         "source_id": member["source_id"],
         "passage": clean(member.get("window", {}).get("text")),
+        "passage_positions": member.get("window", {}).get("positions", []),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -1875,6 +2220,7 @@ def command_cluster(args: argparse.Namespace) -> None:
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     low_confidence = []
     assignment_audit = []
+    cluster_exclusions = []
     for row in sources:
         batch_defs = definitions[row["batch"]]
         target_config = config["targets"][row["batch"]]
@@ -1887,10 +2233,35 @@ def command_cluster(args: argparse.Namespace) -> None:
         if override and not clean(override.get("reason")):
             raise ValueError(f"归簇修正缺少 reason：{row['id']}")
         primary_id = clean(override.get("cluster")) or str(scores[0][1]["id"])
+        if primary_id == "__exclude__":
+            reason_code = clean(override.get("exclude_reason_code"))
+            evidence = clean(override.get("exclusion_evidence") or override.get("evidence"))
+            if reason_code not in ALLOWED_CLUSTER_EXCLUSION_REASONS:
+                raise ValueError(
+                    f"归簇排除缺少合法 exclude_reason_code：{row['id']}；"
+                    f"允许值={sorted(ALLOWED_CLUSTER_EXCLUSION_REASONS)}"
+                )
+            if not evidence or evidence not in source_text(row):
+                raise ValueError(f"归簇排除必须提供本来源全文中的逐字 exclusion_evidence：{row['id']}")
+            exclusion = {
+                "source_id": row["id"],
+                "batch": row["batch"],
+                "reason_code": reason_code,
+                "reason": clean(override.get("reason")),
+                "evidence": evidence,
+                "source_decision": row.get("decision", ""),
+            }
+            cluster_exclusions.append(exclusion)
+            assignment_audit.append({
+                "source_id": row["id"], "batch": row["batch"],
+                "cluster_id": "__exclude__", "basis": "ai_reviewed_display_exclusion",
+                "reason_code": reason_code,
+            })
+            continue
         if primary_id not in by_id[row["batch"]]:
             raise ValueError(f"未知簇修正：{row['id']} -> {primary_id}")
         primary_def = by_id[row["batch"]][primary_id]
-        primary_window = best_window(row, primary_def, [clean(term) for term in override.get("anchor_terms", [])], target_config)
+        primary_window = reviewed_window(row, primary_def, override, target_config)
         primary_alignment = passage_alignment(
             row, primary_window, primary_def, config["targets"][row["batch"]], override
         )
@@ -1900,7 +2271,12 @@ def command_cluster(args: argparse.Namespace) -> None:
         issue = alignment_issue(primary_alignment)
         if not issue and primary_window["score"] <= 0:
             issue = "no_positive_cluster_evidence"
-        elif not issue and required_negative and not any(term in primary_window["text"] for term in required_negative):
+        elif (
+            not issue
+            and required_negative
+            and not clean(override.get("passage_stance"))
+            and not any(term in primary_window["text"] for term in required_negative)
+        ):
             issue = "negative_cluster_missing_negative_cue"
         elif not issue and not override and primary_window["score"] < 5:
             issue = "low_cluster_evidence"
@@ -1918,14 +2294,20 @@ def command_cluster(args: argparse.Namespace) -> None:
         grouped[(row["batch"], primary_id)].append(assignment)
         assignment_audit.append({key: assignment[key] for key in ("source_id", "batch", "cluster_id", "score", "margin", "basis", "alignment")})
         if issue:
-            low_confidence.append({"source_id": row["id"], "batch": row["batch"], "provisional_cluster": primary_id, "issue": issue, "title": row["title"], "body": source_text(row), "top_scores": [{"cluster": str(definition["id"]), "title": definition["title"], "score": score} for score, definition, _ in scores[:3]]})
+            low_confidence.append({
+                "source_id": row["id"], "batch": row["batch"], "provisional_cluster": primary_id,
+                "issue": issue, "issue_guidance": CLUSTER_ASSIGNMENT_ISSUE_GUIDANCE.get(issue, "阅读全文后修正归簇并提供逐字证据"),
+                "current_passage": clean(primary_window.get("text")), "current_alignment": primary_alignment,
+                "override_applied": bool(override), "title": row["title"], "body": source_text(row),
+                "top_scores": [{"cluster": str(definition["id"]), "title": definition["title"], "score": score} for score, definition, _ in scores[:3]],
+            })
         secondary_id = clean(override.get("secondary_cluster"))
         if secondary_id:
             if secondary_id == primary_id or secondary_id not in by_id[row["batch"]]:
                 raise ValueError(f"第二簇修正不合法：{row['id']} -> {secondary_id}")
             secondary_def = by_id[row["batch"]][secondary_id]
-            secondary_window = best_window(row, secondary_def, [clean(term) for term in override.get("secondary_anchor_terms", [])], target_config)
-            if max(primary_window["start"], secondary_window["start"]) < min(primary_window["end"], secondary_window["end"]):
+            secondary_window = reviewed_window(row, secondary_def, override, target_config, secondary=True)
+            if windows_overlap(primary_window, secondary_window):
                 raise ValueError(f"第二观点片段与主观点重叠：{row['id']}")
             secondary_alignment = passage_alignment(
                 row, secondary_window, secondary_def, config["targets"][row["batch"]], override, secondary=True
@@ -1945,7 +2327,12 @@ def command_cluster(args: argparse.Namespace) -> None:
             assignment_audit.append({key: second[key] for key in ("source_id", "batch", "cluster_id", "score", "margin", "basis", "alignment")})
             secondary_issue = alignment_issue(secondary_alignment)
             if secondary_issue:
-                low_confidence.append({"source_id": row["id"], "batch": row["batch"], "provisional_cluster": secondary_id, "issue": secondary_issue, "title": row["title"], "body": source_text(row)})
+                low_confidence.append({
+                    "source_id": row["id"], "batch": row["batch"], "provisional_cluster": secondary_id,
+                    "issue": secondary_issue, "issue_guidance": CLUSTER_ASSIGNMENT_ISSUE_GUIDANCE.get(secondary_issue, "阅读全文后修正第二归簇并提供逐字证据"),
+                    "current_passage": clean(secondary_window.get("text")), "current_alignment": secondary_alignment,
+                    "override_applied": True, "title": row["title"], "body": source_text(row),
+                })
 
     set_review_input = []
     set_review_queue = []
@@ -1981,6 +2368,8 @@ def command_cluster(args: argparse.Namespace) -> None:
                         "published": item["source"].get("published", ""),
                         "episode_scope": item["source"].get("episode_scope", ""),
                         "passage": clean(item["window"].get("text")),
+                        "passage_fragments": item["window"].get("fragments", []),
+                        "passage_positions": item["window"].get("positions", []),
                     }
                     for item in members
                 ],
@@ -2025,6 +2414,8 @@ def command_cluster(args: argparse.Namespace) -> None:
                     "published": member["source"].get("published", ""),
                     "episode_scope": member["source"].get("episode_scope", ""),
                     "passage": clean(member.get("window", {}).get("text")),
+                    "passage_fragments": member.get("window", {}).get("fragments", []),
+                    "passage_positions": member.get("window", {}).get("positions", []),
                 }
                 member_review_input.append(member_input)
                 member_issues = validate_cluster_member_review(
@@ -2124,6 +2515,7 @@ def command_cluster(args: argparse.Namespace) -> None:
     write_json(run_dir / "workbench_order_audit.json", {"random": False, "clusters": order_audit})
     write_json(run_dir / "cluster_assignment_audit.json", {"assignments": assignment_audit, "cluster_members": cluster_members})
     write_jsonl(run_dir / "cluster_review_queue.jsonl", low_confidence)
+    write_jsonl(run_dir / "cluster_exclusions.jsonl", cluster_exclusions)
     write_json(run_dir / "cluster_set_review_input.json", {"scope": "current_period_cluster_set_review_input", "clusters": set_review_input})
     write_jsonl(run_dir / "cluster_set_review_queue.unresolved.jsonl", set_review_queue)
     write_json(run_dir / "cluster_count_review_input.json", {"scope": "current_period_cluster_count_review_input", "batches": count_review_input})
@@ -2131,18 +2523,42 @@ def command_cluster(args: argparse.Namespace) -> None:
     write_json(run_dir / "cluster_count_review_audit.json", count_review_audit)
     write_json(run_dir / "cluster_member_semantic_review_input.json", {"scope": "current_period_cluster_member_semantic_review_input", "members": member_review_input})
     write_jsonl(run_dir / "cluster_member_semantic_review_queue.unresolved.jsonl", member_review_queue)
-    summary = {"status": "CLUSTERED", "retained_sources": len(sources), "assignments": len(assignment_audit), "workbench_items": len(selected), "unique_workbench_sources": len({item["source_id"] for item in selected}), "low_confidence_unresolved": len(low_confidence), "cluster_set_review_unresolved": len(set_review_queue), "cluster_count_review_unresolved": len(count_review_queue), "cluster_member_semantic_review_unresolved": len(member_review_queue), "batches": dict(Counter(item["batch"] for item in selected))}
+    summary = {"status": "CLUSTERED", "retained_sources": len(sources), "assignments": len(assignment_audit), "display_exclusions": len(cluster_exclusions), "workbench_items": len(selected), "unique_workbench_sources": len({item["source_id"] for item in selected}), "low_confidence_unresolved": len(low_confidence), "cluster_set_review_unresolved": len(set_review_queue), "cluster_count_review_unresolved": len(count_review_queue), "cluster_member_semantic_review_unresolved": len(member_review_queue), "batches": dict(Counter(item["batch"] for item in selected))}
     write_json(run_dir / "cluster_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 def excerpt_candidates(body: str, window: dict, definition: dict) -> list[dict]:
     spans = sentence_spans(body)
-    anchored = [index for index, span in enumerate(spans) if span["start"] < window["end"] and span["end"] > window["start"]]
+    window_positions = window.get("positions") or [[window["start"], window["end"]]]
+    anchored = [
+        index for index, span in enumerate(spans)
+        if any(span["start"] < end and span["end"] > start for start, end in window_positions)
+    ]
     if not anchored and spans:
         anchored = [min(range(len(spans)), key=lambda index: abs(spans[index]["start"] - window["start"]))]
     indexes = sorted(set(index for anchor in anchored for index in (anchor - 1, anchor, anchor + 1) if 0 <= index < len(spans)))
     candidates = []
+    if window.get("reviewed_fragments"):
+        reviewed_fragments = [str(value) for value in window.get("fragments", [])]
+        reviewed_positions = window.get("positions", [])
+        reviewed_excerpt = " ".join(fragment.strip() for fragment in reviewed_fragments)
+        reviewed_display_length = len(clean_display_excerpt(reviewed_excerpt))
+        if (
+            1 <= len(reviewed_fragments) <= 2
+            and len(normalized(reviewed_excerpt)) >= 18
+            and reviewed_display_length <= EXCERPT_MAX
+            and not LEADING_FRAGMENT.search(reviewed_excerpt)
+        ):
+            validate_fragment_positions(body, reviewed_fragments, reviewed_positions)
+            cluster_value, _ = cluster_score(reviewed_excerpt, "", definition)
+            candidates.append({
+                "fragments": reviewed_fragments,
+                "positions": reviewed_positions,
+                "excerpt": reviewed_excerpt,
+                "score": round(cluster_value, 3),
+                "reviewed_passage": True,
+            })
     for start in indexes:
         for end in range(start, min(len(spans), start + 2)):
             if not any(index in anchored for index in range(start, end + 1)):
@@ -2164,7 +2580,7 @@ def excerpt_candidates(body: str, window: dict, definition: dict) -> list[dict]:
             cut = max((raw.rfind(mark, EXCERPT_PREFERRED_MIN, EXCERPT_MAX + 1) + 1 for mark in "。！？；!?;"), default=0)
             raw = raw[:cut or EXCERPT_MAX]
         return [{"fragments": [raw], "positions": [[window["start"], window["start"] + len(raw)]], "excerpt": raw.strip(), "score": 0.0}]
-    candidates.sort(key=lambda item: (-item["score"], item["positions"][0][0]))
+    candidates.sort(key=lambda item: (not item.get("reviewed_passage", False), -item["score"], item["positions"][0][0]))
     return candidates
 
 
@@ -2617,6 +3033,7 @@ def command_render(args: argparse.Namespace) -> None:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         raise SystemExit(1)
     cluster_count_audit = load_json(count_audit_path)
+    post_count_reviews = post_excerpt_count_review_map(args.post_count_reviews)
     cluster_member_unresolved = load_jsonl(run_dir / "cluster_member_semantic_review_queue.unresolved.jsonl") if (run_dir / "cluster_member_semantic_review_queue.unresolved.jsonl").exists() else []
     if cluster_member_unresolved:
         summary = {
@@ -2646,8 +3063,11 @@ def command_render(args: argparse.Namespace) -> None:
     semantic_rejected = []
     failures = []
     drop_reason_counts: Counter[tuple[str, str, str]] = Counter()
+    drop_reason_view_ids: dict[tuple[str, str, str], list[str]] = defaultdict(list)
     drop_counts: Counter[tuple[str, str]] = Counter()
     cluster_display_audit = []
+    post_count_review_input = []
+    post_count_review_audit = {}
     for batch in load_json(run_dir / "period_config.json")["batch_order"]:
         clusters = []
         staged_clusters = []
@@ -2680,6 +3100,10 @@ def command_render(args: argparse.Namespace) -> None:
                         raise ValueError("展示片段清理后仍含话题标签、平台表情、链接或账号标记")
                     if len(excerpt) > EXCERPT_MAX:
                         raise ValueError(f"展示片段超过 {EXCERPT_MAX} 字，需保留核心判断和具体依据后重截")
+                    if excerpt.startswith(BAD_EXCERPT_START) or excerpt.endswith(BAD_EXCERPT_END):
+                        raise ValueError("展示片段边界不完整，需回看全文重截")
+                    if unbalanced_display_quotes(excerpt):
+                        raise ValueError("展示片段引号不成对，需回看全文重截")
                 except (ValueError, IndexError) as exc:
                     failures.append({"view_id": view_id, "stage": "verbatim", "issue": str(exc)})
                     continue
@@ -2694,7 +3118,18 @@ def command_render(args: argparse.Namespace) -> None:
                 semantic_input = {
                     "view_id": view_id, "batch": batch, "cluster_id": str(definition["id"]),
                     "cluster_title": definition["title"], "cluster_stance": definition["stance"],
-                    "excerpt": excerpt, "adjacent_context": clean(item.get("window", {}).get("text")),
+                    "excerpt": excerpt,
+                    "cleaned_excerpt": excerpt,
+                    "raw_excerpt": raw_excerpt,
+                    "full_source_text": body,
+                    "adjacent_context": clean(item.get("window", {}).get("text")),
+                    "evidence_scopes": {
+                        "target_evidence": "raw_excerpt",
+                        "work_consistency_evidence": "raw_excerpt",
+                        "aspect_evidence": "cleaned_excerpt",
+                        "stance_evidence": "cleaned_excerpt",
+                        "specific_support_evidence": "cleaned_excerpt",
+                    },
                     "promotion_markers": promotion_markers,
                     "excerpt_length": len(excerpt),
                     "preferred_length": [EXCERPT_PREFERRED_MIN, EXCERPT_MAX],
@@ -2765,6 +3200,7 @@ def command_render(args: argparse.Namespace) -> None:
                         if not item_failures:
                             reason_key = drop_reason_fingerprint(drop_reason)
                             drop_reason_counts[(batch, str(definition["id"]), reason_key)] += 1
+                            drop_reason_view_ids[(batch, str(definition["id"]), reason_key)].append(view_id)
                             drop_counts[(batch, str(definition["id"]))] += 1
                             semantic_rejected.append({
                                 "view_id": view_id,
@@ -2812,10 +3248,14 @@ def command_render(args: argparse.Namespace) -> None:
                     key=lambda pair: pair[1],
                 )
                 if repeated_count / cluster_drop_total >= 0.6:
+                    repeated_view_ids = drop_reason_view_ids.get(
+                        (batch, str(definition["id"]), repeated_reason), []
+                    )
                     failures.append({
                         "view_id": f"{batch}::{definition['id']}",
                         "stage": "semantic_review_quality",
                         "issue": f"同一模板化删除理由覆盖 {repeated_count}/{cluster_drop_total} 条（已剥离理由中引用的逐条原文后统计）：{repeated_reason}。必须逐条回看全文、先尝试重截，并写出真正不同的失败项与具体原因",
+                        "affected_view_ids": repeated_view_ids,
                     })
             if display_items:
                 clusters.append({
@@ -2846,15 +3286,39 @@ def command_render(args: argparse.Namespace) -> None:
         batch_count = sum(cluster["count"] for cluster in clusters)
         staged_count = sum(cluster["count"] for cluster in staged_clusters)
         reviewed_count = cluster_count_audit.get(batch, {})
-        if reviewed_count.get("status") != "PASS" or reviewed_count.get("cluster_count") != len(clusters):
+        if reviewed_count.get("status") != "PASS":
             failures.append({
                 "view_id": f"{batch}::cluster-count",
-                "stage": "cluster_count_after_excerpt_review",
-                "issue": (
-                    f"终审后工作台含 {len(clusters)} 个观点簇，与已审数量 "
-                    f"{reviewed_count.get('cluster_count', '缺失')} 不一致；请修复空簇或重跑整期簇数审查"
-                ),
+                "stage": "cluster_count_before_excerpt_review",
+                "issue": "终审前观点簇数量审查未通过",
             })
+        elif reviewed_count.get("cluster_count") != len(clusters):
+            count_issues, count_audit = post_excerpt_count_review_issues(
+                batch, clusters, post_count_reviews.get(batch)
+            )
+            count_input = {
+                "review_key": batch,
+                "fingerprint": count_audit["fingerprint"],
+                "batch": batch,
+                "pre_excerpt_cluster_count": reviewed_count.get("cluster_count"),
+                "post_excerpt_cluster_count": len(clusters),
+                "normal_review_range": {"min": 9, "max": 16},
+                "expected_range_status": count_audit["range_status"],
+                "clusters": [
+                    {"id": cluster["id"], "title": cluster["title"], "stance": cluster["stance"], "samples": cluster["count"]}
+                    for cluster in clusters
+                ],
+                "instruction": "终审已明确删除不合格展示段并可能清空簇；只复核终审后的实际一级簇数量与颗粒度，不回改终审前数字，不为进入9至16机械合并或补造观点",
+            }
+            post_count_review_input.append(count_input)
+            post_count_review_audit[batch] = {**count_audit, "status": "PASS" if not count_issues else "REVIEW_REQUIRED", "issues": count_issues}
+            if count_issues:
+                failures.append({
+                    "view_id": f"{batch}::post-excerpt-cluster-count",
+                    "stage": "post_excerpt_cluster_count_review",
+                    "issue": f"终审后工作台含 {len(clusters)} 个观点簇，终审前为 {reviewed_count.get('cluster_count')}；请完成后置数量复核",
+                    "issues": count_issues,
+                })
         dataset["batches"].append({
             "name": batch,
             "count": batch_count,
@@ -2874,9 +3338,15 @@ def command_render(args: argparse.Namespace) -> None:
     write_jsonl(run_dir / "excerpt_semantic_review_queue.unresolved.jsonl", semantic_pending)
     write_jsonl(run_dir / "excerpt_semantic_review_rejected.jsonl", semantic_rejected)
     write_json(run_dir / "cluster_display_coverage_audit.json", {"clusters": cluster_display_audit})
+    write_json(run_dir / "post_excerpt_cluster_count_review_input.json", {
+        "scope": "current_period_post_excerpt_cluster_count_review_input",
+        "batches": post_count_review_input,
+    })
+    write_json(run_dir / "post_excerpt_cluster_count_review_audit.json", post_count_review_audit)
     write_json(run_dir / "render_failures.json", {"failures": failures})
     if failures:
-        summary = {"status": "REVIEW_REQUIRED", "staged_items": staged_dataset["total"], "accepted_items": dataset["total"], "reviewed_dropped_items": len(semantic_rejected), "failures": len(failures), "unreviewed_final_excerpts": len(semantic_pending), "output_not_replaced": str(args.output.resolve())}
+        failure_stages = {clean(item.get("stage")) for item in failures}
+        summary = {"status": "REVIEW_REQUIRED", "stage": "post_excerpt_cluster_count_review" if failure_stages == {"post_excerpt_cluster_count_review"} else "render_repair", "staged_items": staged_dataset["total"], "accepted_items": dataset["total"], "reviewed_dropped_items": len(semantic_rejected), "failures": len(failures), "unreviewed_final_excerpts": len(semantic_pending), "post_excerpt_count_reviews_required": len(post_count_review_input), "output_not_replaced": str(args.output.resolve())}
         write_json(run_dir / "render_summary.json", summary)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         raise SystemExit(1)
@@ -3076,6 +3546,10 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("--config", required=True, type=Path)
     prepare.add_argument("--run", required=True, type=Path)
     prepare.set_defaults(func=command_prepare)
+    validate_reviews = commands.add_parser("validate-source-reviews")
+    validate_reviews.add_argument("--run", required=True, type=Path)
+    validate_reviews.add_argument("--reviews", required=True, type=Path)
+    validate_reviews.set_defaults(func=command_validate_source_reviews)
     select = commands.add_parser("select")
     select.add_argument("--run", required=True, type=Path)
     select.add_argument("--reviews", type=Path)
@@ -3093,6 +3567,7 @@ def parser() -> argparse.ArgumentParser:
     render.add_argument("--run", required=True, type=Path)
     render.add_argument("--excerpt-reviews", type=Path)
     render.add_argument("--semantic-reviews", type=Path)
+    render.add_argument("--post-count-reviews", type=Path)
     render.add_argument("--output", required=True, type=Path)
     render.set_defaults(func=command_render)
     merge = commands.add_parser("merge")
