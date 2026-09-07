@@ -79,7 +79,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
       "source_id": "稳定来源ID",
       "decision": "retain_core",
       "reason": "原文包含具体观后判断及支撑细节",
-      "evidence_position": [128, 196],
+      "evidence_candidate_index": 1,
       "episode_scope": "latest_episode",
       "episode_evidence": "原文中的本期嘉宾、选手、环节或话题证据",
       "prominence_basis": "仅 previous_episode_prominent 时填写"
@@ -88,7 +88,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须填写当前来源专属的 `reason`，并提供连续逐字 `evidence` 或 `[start,end]` 形式的 `evidence_position`；`exclude` 的证据应直接支撑“跨剧、无观点、纯推广、期次不符”等排除理由。位置基准是队列给出的 `evidence_source_text`：普通原帖通常为标题与正文的无重复拼接，评论和转帖为其自身文字。`prepare` 同时给出候选片段和字符位置，优先直接复制候选位置，避免漏掉 emoji、空格或中间句。来源复核文件必须覆盖 `source_review_queue.jsonl` 的全部项目；控制器会在耗时的链接检查之前生成 `source_review_validation.json`，一次列出全部缺失、越界或字段错误。低于 `quality_floor` 但已经具备目标、判断和依据的来源进入 `retain_consensus`，质量分只影响排序。
+`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须填写当前来源专属的 `reason` 和证据。优先填写 `evidence_candidate_index`，从同一队列项的 `review_evidence_candidates` 中选择编号；脚本会自动还原逐字原文及 `[start,end]`，无需手算位置。候选均不能支撑实际决定时，才填写连续逐字 `evidence` 或 `evidence_position`。`exclude` 的证据应直接支撑“跨剧、无观点、纯推广、期次不符”等排除理由。位置基准是队列给出的 `evidence_source_text`。来源复核文件必须覆盖 `source_review_queue.jsonl` 的全部项目；控制器会在耗时的链接检查之前生成 `source_review_validation.json`，一次列出全部缺失、越界或字段错误，并给出可选候选编号。证据格式错误时修正证据字段，不得为了绕过校验改变正确的语义决定。低于 `quality_floor` 但已经具备目标、判断和依据的来源进入 `retain_consensus`，质量分只影响排序。
 
 ## `dedup_reviews.json`
 
@@ -106,7 +106,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-`decision` 仅允许 `same_copy` 或 `independent`。高阈值文本重复默认合并；中等相似候选默认保留，AI确认共享同一稿件骨架后才合并。
+`decision` 仅允许 `same_copy` 或 `independent`，每对必须填写具体 `reason`。控制器生成的 `dedup_reviews.template.json` 已预填全部 `left_id/right_id`；模型保持ID不动，只补两个字段。`dedup_review_queue.unresolved.jsonl` 同时提供左右来源的作者、渠道、标题和紧凑对照文字，无需从全量来源文件重新组装候选。高阈值文本重复默认合并；中等相似候选默认保留，AI确认共享同一稿件骨架后才合并。
 
 ## `cluster_definitions.json`
 
@@ -132,6 +132,8 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 ```
 
 每个批次必须至少一个簇；ID在批次内唯一；`stance` 必须是 `positive`、`objective`、`negative` 之一；标题应是能直接理解的完整报告体观点句，并按实现要求以报告谓语开头，或在逗号后的判断分句使用明确谓语。“演员表现”“剧情张力”一类短标签不合格。负向簇可填写 `negative_cues` 辅助自动发现；它只用于未复核条目的路由，AI已用 `passage_stance` 和逐字证据确认的负面片段不会因未命中固定词表而被否决。客观舆情概况可设 `objective_meta: true`。不要求每个批次三种立场齐全，也不要求每簇达到任何样本数量。
+
+初次观点发现读取 `cluster_discovery_input.jsonl`。每条只包含一个当前来源的逐字候选片段、来源ID及必要元数据；若片段不足以确认语义或作品归属，再按 `source_id` 到 `retained_sources.jsonl` 回查该条全文。该紧凑文件只降低读取负担，不改变来源去留，也不代替后续逐成员全文核验。
 
 ## `cluster_set_reviews.json`
 

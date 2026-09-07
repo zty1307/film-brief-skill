@@ -1229,6 +1229,8 @@ def load_dedup_reviews(path: Path | None) -> dict[tuple[str, str], str]:
         pair = tuple(sorted((clean(item.get("left_id")), clean(item.get("right_id")))))
         if not all(pair) or item.get("decision") not in {"same_copy", "independent"}:
             raise ValueError("dedup_reviews 项不合法")
+        if not clean(item.get("reason")):
+            raise ValueError(f"dedup_reviews 缺少逐对理由：{pair[0]}, {pair[1]}")
         result[pair] = item["decision"]
     return result
 
@@ -1272,11 +1274,38 @@ def copy_components(sources: dict[str, dict], reviews: dict[tuple[str, str], str
     return [sorted(ids) for ids in grouped.values() if len(ids) > 1]
 
 
-def resolve_source_review_evidence(review: dict, row: dict) -> tuple[str, list[int] | None]:
-    """Validate review evidence or derive it safely from an exact source position."""
+def resolve_source_review_evidence(
+    review: dict,
+    row: dict,
+    queue_item: dict | None = None,
+) -> tuple[str, list[int] | None]:
+    """Resolve review evidence from a generated candidate or exact source text."""
     source = source_text(row)
+    candidate_index = review.get("evidence_candidate_index")
     position = review.get("evidence_position")
     supplied = clean(review.get("evidence"))
+    if candidate_index is not None:
+        if not isinstance(candidate_index, int) or isinstance(candidate_index, bool) or candidate_index < 1:
+            raise ValueError(f"AI复核 evidence_candidate_index 必须是从1开始的整数：{row['id']}")
+        candidates = (queue_item or {}).get("review_evidence_candidates", [])
+        selected = next(
+            (
+                item for item in candidates
+                if isinstance(item, dict) and int(item.get("candidate_index", 0) or 0) == candidate_index
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"AI复核 evidence_candidate_index 不在本来源候选范围内：{row['id']}")
+        start, end = selected.get("start"), selected.get("end")
+        if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start or end > len(source):
+            raise ValueError(f"来源候选证据位置无效：{row['id']}")
+        extracted = source[start:end]
+        if supplied and supplied != clean(extracted):
+            raise ValueError(f"AI复核 evidence 与候选证据不一致：{row['id']}")
+        if position is not None and position != [start, end]:
+            raise ValueError(f"AI复核 evidence_position 与候选证据不一致：{row['id']}")
+        return extracted, [start, end]
     if position is not None:
         if not isinstance(position, list) or len(position) != 2 or not all(isinstance(value, int) for value in position):
             raise ValueError(f"AI复核 evidence_position 必须是 [start,end]：{row['id']}")
@@ -1303,7 +1332,8 @@ def source_review_validation_issues(
 ) -> list[dict]:
     """Collect every source-review contract error in one fast preflight."""
     issues: list[dict] = []
-    queue_ids = {clean(row.get("id")) for row in queue}
+    queue_by_id = {clean(row.get("id")): row for row in queue}
+    queue_ids = set(queue_by_id)
     for source_id in sorted(queue_ids - set(reviews)):
         issues.append({"source_id": source_id, "issue": "missing_review"})
     for source_id in sorted(set(reviews) - set(sources)):
@@ -1318,11 +1348,20 @@ def source_review_validation_issues(
         if not clean(review.get("reason")):
             issues.append({"source_id": source_id, "issue": "missing_reason"})
         try:
-            evidence, _ = resolve_source_review_evidence(review, row)
+            evidence, _ = resolve_source_review_evidence(review, row, queue_by_id.get(source_id))
             if not evidence:
                 issues.append({"source_id": source_id, "issue": "missing_verbatim_evidence"})
         except ValueError as exc:
-            issues.append({"source_id": source_id, "issue": "invalid_evidence", "detail": str(exc)})
+            candidates = queue_by_id.get(source_id, {}).get("review_evidence_candidates", [])
+            issues.append({
+                "source_id": source_id,
+                "issue": "invalid_evidence",
+                "detail": str(exc),
+                "repair": "从本来源 review_evidence_candidates 选择 evidence_candidate_index；只有候选均不合适时才逐字复制新证据",
+                "available_candidate_indexes": [
+                    item.get("candidate_index") for item in candidates if isinstance(item, dict)
+                ],
+            })
         target_config = period_config.get("targets", {}).get(row["batch"], {})
         if clean(target_config.get("content_mode")) == "episodic_variety":
             episode_scope = clean(review.get("episode_scope"))
@@ -1357,6 +1396,75 @@ def command_validate_source_reviews(args: argparse.Namespace) -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if issues:
         raise SystemExit(1)
+
+
+def cluster_discovery_record(row: dict, auto_result: dict) -> dict:
+    """Build a compact, verbatim-first record for initial viewpoint discovery."""
+    source = source_text(row)
+    passages: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+
+    review_position = row.get("review_evidence_position")
+    if (
+        isinstance(review_position, list)
+        and len(review_position) == 2
+        and all(isinstance(value, int) for value in review_position)
+    ):
+        start, end = review_position
+        if 0 <= start < end <= len(source):
+            passages.append({
+                "start": start,
+                "end": end,
+                "text": source[start:end],
+                "basis": "source_review_evidence",
+            })
+            seen.add((start, end))
+
+    for candidate in ([] if passages else auto_result.get("review_evidence_candidates", [])):
+        if not isinstance(candidate, dict):
+            continue
+        start, end = candidate.get("start"), candidate.get("end")
+        if not isinstance(start, int) or not isinstance(end, int) or not (0 <= start < end <= len(source)):
+            continue
+        if (start, end) in seen:
+            continue
+        passages.append({
+            "start": start,
+            "end": end,
+            "text": source[start:end],
+            "basis": "deterministic_viewpoint_candidate",
+        })
+        seen.add((start, end))
+        if len(passages) >= 1:
+            break
+
+    if not passages and source:
+        end = min(len(source), 700)
+        passages.append({
+            "start": 0,
+            "end": end,
+            "text": source[:end],
+            "basis": "source_opening_fallback",
+        })
+
+    return {
+        "source_id": row["id"],
+        "batch": row["batch"],
+        "channel": row.get("channel", ""),
+        "author": row.get("author", ""),
+        "published": row.get("published", ""),
+        "title": row.get("title", ""),
+        "source_stance": row.get("stance", ""),
+        "decision": row.get("decision", ""),
+        "quality": row.get("quality", 0),
+        "source_text_length": len(source),
+        "discovery_passages": passages,
+        "full_text_lookup": {
+            "file": "retained_sources.jsonl",
+            "source_id": row["id"],
+            "instruction": "仅在片段语义不清或需要确认跨作品归属时按 source_id 回查全文",
+        },
+    }
 
 
 def load_link_health(path: Path) -> dict[str, dict]:
@@ -1401,6 +1509,7 @@ def command_select(args: argparse.Namespace) -> None:
     missing_link_checks = sorted(expected_urls - set(link_health))
     if missing_link_checks:
         raise ValueError(f"link_health 未覆盖 {len(missing_link_checks)} 个来源 URL，例如：{missing_link_checks[:3]}")
+    queue_by_id = {clean(row.get("id")): row for row in review_queue}
     pending_reviews = [row for row in review_queue if row["id"] not in reviews]
     write_jsonl(run_dir / "source_review_queue.unresolved.jsonl", pending_reviews)
     unknown = set(reviews) - set(sources)
@@ -1412,13 +1521,16 @@ def command_select(args: argparse.Namespace) -> None:
         review = reviews.get(source_id)
         decision = clean(review.get("decision")) if review else base["auto_decision"]
         reason = clean(review.get("reason")) if review else base["auto_reason"]
-        evidence, evidence_position = resolve_source_review_evidence(review, row) if review else ("", None)
+        evidence, evidence_position = (
+            resolve_source_review_evidence(review, row, queue_by_id.get(source_id))
+            if review else ("", None)
+        )
         if decision not in ALLOWED_DECISIONS:
             raise ValueError(f"非法来源决定：{source_id} {decision}")
         if review and not reason:
             raise ValueError(f"AI复核缺少理由：{source_id}")
         if review and not evidence:
-            raise ValueError(f"AI复核缺少逐字依据或 evidence_position：{source_id}")
+            raise ValueError(f"AI复核缺少 evidence_candidate_index、逐字 evidence 或 evidence_position：{source_id}")
         target_config = period_config.get("targets", {}).get(row["batch"], {})
         if review and clean(target_config.get("content_mode")) == "episodic_variety":
             episode_scope = clean(review.get("episode_scope"))
@@ -1512,6 +1624,10 @@ def command_select(args: argparse.Namespace) -> None:
 
     kept.sort(key=lambda row: (row["batch"], -int(row.get("media_authority_rank", 0)), -CHANNEL_PRIORITY.get(row["channel"], 0), -float(row["quality"]), row["id"]))
     write_jsonl(run_dir / "retained_sources.jsonl", kept)
+    write_jsonl(
+        run_dir / "cluster_discovery_input.jsonl",
+        [cluster_discovery_record(row, auto[row["id"]]) for row in kept],
+    )
     write_json(run_dir / "source_decisions.final.json", {"decisions": [{"source_id": row["id"], "decision": row["decision"], "reason": row["decision_reason"], "basis": row["decision_basis"], "evidence": row.get("review_evidence", ""), "evidence_position": row.get("review_evidence_position")} for row in decided]})
     write_json(run_dir / "dedup_audit.json", {"copy_families": family_audit, "duplicates": duplicates, "medium_similarity_candidates": candidates})
     write_json(run_dir / "hard_exclusion_audit.json", {"exclusions": hard_exclusions})

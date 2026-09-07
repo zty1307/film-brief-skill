@@ -140,6 +140,63 @@ issues = p.source_review_validation_issues(
 assert {item["issue"] for item in issues} >= {"missing_review", "missing_reason", "invalid_evidence"}
 assert {item["source_id"] for item in issues} == {"a", "b"}
 
+# Ordinary models can select a generated evidence candidate by index; the
+# pipeline resolves the exact source substring and character offsets.
+candidate_source = p.source_text(sources["a"])
+candidate_start = candidate_source.index("测试剧难看")
+candidate_end = candidate_start + len("测试剧难看的原因很多。")
+candidate_queue = [{
+    "id": "a",
+    "review_evidence_candidates": [{
+        "candidate_index": 1,
+        "start": candidate_start,
+        "end": candidate_end,
+        "text": candidate_source[candidate_start:candidate_end],
+    }],
+}]
+candidate_review = {
+    "source_id": "a", "decision": "exclude", "reason": "正文评价的是另一套人物故事",
+    "evidence_candidate_index": 1,
+}
+assert not p.source_review_validation_issues(
+    {"a": sources["a"]}, candidate_queue, {"a": candidate_review},
+    {"targets": {"测试": {"content_mode": "serial_drama"}}},
+)
+resolved, resolved_position = p.resolve_source_review_evidence(
+    candidate_review, sources["a"], candidate_queue[0]
+)
+assert resolved == "测试剧难看的原因很多。" and resolved_position == [candidate_start, candidate_end]
+
+# The dedup handoff is directly fillable and carries compact side-by-side text.
+dedup_candidates = [{
+    "left_id": "a", "right_id": "b", "batch": "测试",
+    "jaccard": 0.4, "containment": 0.6,
+}]
+dedup_rows = [
+    {**sources["a"], "review_evidence": "测试剧难看的原因很多。"},
+    {**sources["b"], "review_evidence": "测试剧难看的原因很多。"},
+]
+dedup_worklist = w.dedup_review_worklist(dedup_candidates, dedup_rows)
+dedup_template = w.dedup_review_template_payload("wf", [], dedup_worklist)
+assert len(dedup_template["reviews"]) == 1
+assert dedup_worklist[0]["left"]["comparison_text"] and dedup_worklist[0]["right"]["comparison_text"]
+required_pair = {w.pair_key("a", "b")}
+assert {item["issue"] for item in w.dedup_review_validation_issues(dedup_template, required_pair)} == {
+    "invalid_or_missing_decision", "missing_reason",
+}
+dedup_template["reviews"][0].update({"decision": "independent", "reason": "作者和表达独立"})
+assert not w.dedup_review_validation_issues(dedup_template, required_pair)
+
+# Initial clustering receives one compact verbatim passage per retained source,
+# while the full body remains available only by source-id lookup.
+discovery_row = {**sources["a"], "decision": "retain_consensus", "quality": 8.0, "stance": "负向"}
+discovery = p.cluster_discovery_record(discovery_row, {
+    "review_evidence_candidates": candidate_queue[0]["review_evidence_candidates"],
+})
+assert len(discovery["discovery_passages"]) == 1 and "body" not in discovery
+discovery_passage = discovery["discovery_passages"][0]
+assert p.source_text(discovery_row)[discovery_passage["start"]:discovery_passage["end"]] == discovery_passage["text"]
+
 
 # Post-excerpt count review uses the actual display clusters and has one clear contract.
 display_clusters = [{

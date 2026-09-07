@@ -69,15 +69,18 @@ STAGE_GUIDANCE = {
     ],
     "source_review": [
         "逐条阅读队列中的完整标题、正文、ASR及必要父帖上下文，不凭标题或关键词单独判断",
-        "retain 与 exclude 都必须填写具体理由，并提供 evidence 或 evidence_position 指向本来源逐字原文",
+        "retain 与 exclude 都必须填写具体理由；优先填写 evidence_candidate_index 选择脚本候选，候选均不适用时再提供逐字 evidence 或 evidence_position",
+        "证据格式错误时只修证据字段，不得为了通过校验把 retain 改成 exclude",
         "相同观点的独立作者均可保留；综艺还须核对最新一期、前一期当周突出话题或节目级讨论",
     ],
     "dedup_review": [
+        "模板已预填全部 left_id/right_id，保持ID不动，只填写 decision 和逐对 reason",
         "只有转载、同稿跨平台分发、洗稿或共享明确稿件骨架才标 same_copy",
         "不同作者独立表达相近观点标 independent，不能因为观点相似而删除",
     ],
     "cluster_discovery": [
-        "只依据本期 retained_sources 从数据中归纳一级观点，不读取人工成品反推答案",
+        "先通读 cluster_discovery_input 的紧凑逐字片段；仅在片段语义不清时按 source_id 回查 retained_sources 全文",
+        "只依据本期数据归纳一级观点，不读取人工成品反推答案",
         "标题写成可直接理解的报告体判断句，并明确 positive、objective 或 negative",
         "按共同评价机制聚合，人物、角色、段子和单项指标通常作为证据侧面；9至16个仅为颗粒度复查范围",
     ],
@@ -636,6 +639,132 @@ def pair_key(left: object, right: object) -> str:
     return "\t".join(sorted((clean(left), clean(right))))
 
 
+def source_review_template_payload(workflow_id: str, inputs: list[Path], queue: list[dict]) -> dict:
+    reviews = []
+    for item in queue:
+        review = {
+            "source_id": clean(item.get("id")),
+            "decision": "",
+            "reason": "",
+            "evidence_candidate_index": None,
+        }
+        if clean(item.get("episode_review_instruction")):
+            review.update({
+                "episode_scope": "",
+                "episode_evidence": "",
+                "prominence_basis": "",
+            })
+        reviews.append(review)
+    return {
+        "scope": "current_period_source_fulltext_reviews",
+        "_workflow": binding(workflow_id, inputs),
+        "contract": {
+            "allowed_decisions": ["retain_core", "retain_consensus", "exclude"],
+            "required_for_every_decision": ["source_id", "decision", "reason", "evidence_candidate_index_or_exact_evidence"],
+            "evidence_candidate_index": "choose a candidate_index from the same input item; the script resolves exact text and offsets",
+            "exact_evidence_fallback": "use evidence or evidence_position only when no generated candidate supports the decision",
+            "exact_copy_group": "review the representative once; select propagates the result to copy_group_source_ids",
+        },
+        "reviews": reviews,
+    }
+
+
+def source_review_is_filled(item: dict) -> bool:
+    evidence_ready = (
+        isinstance(item.get("evidence_candidate_index"), int)
+        and not isinstance(item.get("evidence_candidate_index"), bool)
+        and item.get("evidence_candidate_index") >= 1
+    ) or bool(clean(item.get("evidence"))) or isinstance(item.get("evidence_position"), list)
+    return (
+        clean(item.get("decision")) in {"retain_core", "retain_consensus", "exclude"}
+        and bool(clean(item.get("reason")))
+        and evidence_ready
+    )
+
+
+def compact_pair_side(row: dict) -> dict:
+    full_text = clean(row.get("body")) or clean(row.get("asr")) or clean(row.get("title"))
+    return {
+        "source_id": clean(row.get("id")),
+        "channel": clean(row.get("channel")),
+        "author": clean(row.get("author")),
+        "title": clean(row.get("title")),
+        "comparison_text": full_text[:1200],
+        "review_evidence": clean(row.get("review_evidence")),
+        "source_text_length": len(full_text),
+    }
+
+
+def dedup_review_worklist(candidates: list[dict], retained_sources: list[dict]) -> list[dict]:
+    sources = {clean(row.get("id")): row for row in retained_sources}
+    worklist = []
+    for item in candidates:
+        left_id, right_id = clean(item.get("left_id")), clean(item.get("right_id"))
+        worklist.append({
+            "left_id": left_id,
+            "right_id": right_id,
+            "batch": clean(item.get("batch")),
+            "jaccard": item.get("jaccard"),
+            "containment": item.get("containment"),
+            "left": compact_pair_side(sources.get(left_id, {})),
+            "right": compact_pair_side(sources.get(right_id, {})),
+            "decision_rule": "same_copy 仅用于转载、洗稿或共享明确稿件骨架；相近观点的独立表达填 independent",
+        })
+    return worklist
+
+
+def dedup_review_template_payload(workflow_id: str, inputs: list[Path], worklist: list[dict]) -> dict:
+    return {
+        "scope": "current_period_copy_reviews",
+        "_workflow": binding(workflow_id, inputs),
+        "contract": {
+            "allowed_decisions": ["same_copy", "independent"],
+            "required": ["left_id", "right_id", "decision", "reason"],
+            "instruction": "保留预填ID，只填写decision和逐对理由；不要把整份候选列表嵌套进reviews",
+        },
+        "reviews": [
+            {
+                "left_id": item["left_id"],
+                "right_id": item["right_id"],
+                "decision": "",
+                "reason": "",
+            }
+            for item in worklist
+        ],
+    }
+
+
+def dedup_review_is_filled(item: dict) -> bool:
+    return clean(item.get("decision")) in {"same_copy", "independent"} and bool(clean(item.get("reason")))
+
+
+def dedup_review_validation_issues(payload: dict | None, required_pairs: set[str]) -> list[dict]:
+    issues = []
+    seen: set[str] = set()
+    reviews = (payload or {}).get("reviews", [])
+    if not isinstance(reviews, list):
+        return [{"issue": "reviews_must_be_list", "required_fix": "reviews 必须使用模板中的数组结构"}]
+    for index, item in enumerate(reviews):
+        if not isinstance(item, dict):
+            issues.append({"index": index, "issue": "review_must_be_object"})
+            continue
+        left_id, right_id = clean(item.get("left_id")), clean(item.get("right_id"))
+        pair = pair_key(left_id, right_id)
+        if not left_id or not right_id:
+            issues.append({"index": index, "issue": "missing_pair_ids"})
+            continue
+        if pair in seen:
+            issues.append({"index": index, "pair": pair, "issue": "duplicate_pair"})
+        seen.add(pair)
+        if pair not in required_pairs:
+            issues.append({"index": index, "pair": pair, "issue": "unknown_pair"})
+        if clean(item.get("decision")) not in {"same_copy", "independent"}:
+            issues.append({"index": index, "pair": pair, "issue": "invalid_or_missing_decision"})
+        if not clean(item.get("reason")):
+            issues.append({"index": index, "pair": pair, "issue": "missing_reason"})
+    return issues
+
+
 def stage_fresh(manifest: dict, stage: str, token: str, required: Iterable[Path] = ()) -> bool:
     saved = manifest.get("stages", {}).get(stage, {})
     required_paths = [path.resolve() for path in required]
@@ -753,24 +882,24 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         issue = binding_issue(source_payload, workflow_id, source_inputs)
         reviewed = list_review_map(source_payload, "source_id")
         required_ids = {clean(item.get("id")) for item in source_queue}
-        missing = sorted(required_ids - set(reviewed))
+        completed_ids = {
+            source_id for source_id, item in reviewed.items()
+            if source_review_is_filled(item)
+        }
+        missing = sorted(required_ids - completed_ids)
         template = p["templates"] / "source_reviews.template.json"
-        ensure_template(template, {
-            "scope": "current_period_source_fulltext_reviews",
-            "_workflow": binding(workflow_id, source_inputs),
-            "contract": {
-                "allowed_decisions": ["retain_core", "retain_consensus", "exclude"],
-                "required_for_every_decision": ["source_id", "decision", "reason", "evidence_or_evidence_position"],
-                "evidence_position_basis": "input_item.evidence_source_text",
-                "exact_copy_group": "review the representative once; select propagates the result to copy_group_source_ids",
-            },
-            "reviews": [],
-        })
+        source_template_payload = source_review_template_payload(workflow_id, source_inputs, source_queue)
+        if (
+            not template.exists()
+            or read_json(template).get("_workflow") != source_template_payload.get("_workflow")
+            or (source_queue and not read_json(template).get("reviews"))
+        ):
+            write_json(template, source_template_payload)
         if issue or missing:
             return result(
-                "REVIEW_REQUIRED", "source_review", "逐条阅读全文并覆盖全部来源语义队列",
+                "REVIEW_REQUIRED", "source_review", "逐条阅读全文并覆盖全部来源语义队列；优先填写候选证据编号，避免手工复制失真",
                 required_file=str(p["source"]), template=str(template), input_file=str(source_inputs[0]),
-                binding_issue=issue, required=len(required_ids), completed=len(required_ids & set(reviewed)), missing=len(missing),
+                binding_issue=issue, required=len(required_ids), completed=len(required_ids & completed_ids), missing=len(missing),
             )
 
         validation_inputs = source_inputs + [PIPELINE, CONTROLLER]
@@ -806,21 +935,25 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
     dedup_inputs = [p['run'] / 'normalized_sources.jsonl', p['run'] / 'source_decisions.auto.jsonl', p['config'], link_health]
     if p['source'].exists():
         dedup_inputs.append(p['source'])
+    dedup_reviews_current = False
     if p["dedup"].exists():
         issue = binding_issue(review_payload(p['dedup']), workflow_id, dedup_inputs)
-        if issue:
-            template = p['templates'] / 'dedup_reviews.template.json'
-            ensure_template(template, {'scope': 'current_period_copy_reviews', '_workflow': binding(workflow_id, dedup_inputs), 'reviews': []})
-            return result('REVIEW_REQUIRED', 'dedup_review', '去重评审输入已变化，请按新模板重新审核后提交', required_file=str(p['dedup']), template=str(template), binding_issue=issue, input_file=str(p['run'] / 'normalized_sources.jsonl'))
-        selection_inputs.append(p["dedup"])
+        if not issue:
+            selection_inputs.append(p["dedup"])
+            dedup_reviews_current = True
     selection_token = digest_paths(selection_inputs)
     if not stage_fresh(manifest, "select", selection_token, [
         p["run"] / "selection_summary.json",
         p["run"] / "retained_sources.jsonl",
+        p["run"] / "cluster_discovery_input.jsonl",
         p["run"] / "dedup_audit.json",
         p["run"] / "source_link_health.applied.json",
     ]):
-        return result("READY_TO_ADVANCE", "select", "可以执行来源筛选与同稿去重", action="select", input_digest=selection_token)
+        return result(
+            "READY_TO_ADVANCE", "select", "可以执行来源筛选与同稿去重",
+            action="select", input_digest=selection_token,
+            use_dedup_reviews=dedup_reviews_current,
+        )
 
     selection_summary = read_json(p["run"] / "selection_summary.json")
     if int(selection_summary.get("unreviewed_source_queue", 0)):
@@ -830,35 +963,48 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
     candidates = dedup_audit.get("medium_similarity_candidates", [])
     dedup_payload = review_payload(p["dedup"])
     dedup_issue = binding_issue(dedup_payload, workflow_id, dedup_inputs) if candidates else ""
+    retained_for_dedup = read_jsonl(p["run"] / "retained_sources.jsonl")
+    dedup_worklist = dedup_review_worklist(candidates, retained_for_dedup)
+    dedup_queue_path = p["run"] / "dedup_review_queue.unresolved.jsonl"
+    required_pairs = {pair_key(item.get("left_id"), item.get("right_id")) for item in candidates}
+    dedup_validation_issues = (
+        dedup_review_validation_issues(dedup_payload, required_pairs)
+        if candidates and dedup_payload is not None and not dedup_issue else []
+    )
     dedup_reviews = {
         pair_key(item.get("left_id"), item.get("right_id")): item
         for item in (dedup_payload or {}).get("reviews", [])
-        if isinstance(item, dict)
+        if isinstance(item, dict) and dedup_review_is_filled(item)
     }
-    required_pairs = {pair_key(item.get("left_id"), item.get("right_id")) for item in candidates}
     pending_pairs = sorted(required_pairs - set(dedup_reviews))
-    write_jsonl(p["run"] / "dedup_review_queue.unresolved.jsonl", [
-        item for item in candidates if pair_key(item.get("left_id"), item.get("right_id")) in pending_pairs
+    write_jsonl(dedup_queue_path, [
+        item for item in dedup_worklist
+        if pair_key(item.get("left_id"), item.get("right_id")) in pending_pairs
     ])
-    if candidates and (dedup_issue or pending_pairs):
-        template = p["templates"] / "dedup_reviews.template.json"
-        ensure_template(template, {
-            "scope": "current_period_copy_reviews",
-            "_workflow": binding(workflow_id, dedup_inputs),
-            "reviews": [],
+    if dedup_validation_issues:
+        write_json(p["run"] / "dedup_review_validation.json", {
+            "status": "REVIEW_REQUIRED",
+            "issue_count": len(dedup_validation_issues),
+            "issues": dedup_validation_issues,
         })
+    if candidates and (dedup_issue or pending_pairs or dedup_validation_issues):
+        template = p["templates"] / "dedup_reviews.template.json"
+        write_json(template, dedup_review_template_payload(workflow_id, dedup_inputs, dedup_worklist))
         return result(
-            "REVIEW_REQUIRED", "dedup_review", "复核中等相似候选；相近观点的独立作者仍须保留",
-            required_file=str(p["dedup"]), template=str(template), input_file=str(p["run"] / "dedup_audit.json"),
+            "REVIEW_REQUIRED", "dedup_review", "模板已预填全部相似候选ID；逐对填写decision和reason即可",
+            required_file=str(p["dedup"]), template=str(template), input_file=str(dedup_queue_path),
             binding_issue=dedup_issue, required=len(required_pairs), completed=len(required_pairs & set(dedup_reviews)), missing=len(pending_pairs),
+            validation_file=str(p["run"] / "dedup_review_validation.json") if dedup_validation_issues else "",
+            validation_issue_count=len(dedup_validation_issues),
         )
 
-    cluster_inputs = [p["run"] / "retained_sources.jsonl"]
+    cluster_discovery_input = p["run"] / "cluster_discovery_input.jsonl"
+    cluster_inputs = [cluster_discovery_input]
     cluster_payload = review_payload(p["clusters"])
     cluster_issue = binding_issue(cluster_payload, workflow_id, cluster_inputs)
     if cluster_issue:
         batches = []
-        for item in read_jsonl(p["run"] / "retained_sources.jsonl"):
+        for item in read_jsonl(cluster_discovery_input):
             batch = clean(item.get("batch"))
             if batch and batch not in batches:
                 batches.append(batch)
@@ -869,8 +1015,9 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             "batches": {batch: [] for batch in batches},
         })
         return result(
-            "REVIEW_REQUIRED", "cluster_discovery", "通读本期保留样本后从数据中归纳一级观点簇，并先标明正面、客观、负面",
-            required_file=str(p["clusters"]), template=str(template), input_file=str(cluster_inputs[0]), binding_issue=cluster_issue,
+            "REVIEW_REQUIRED", "cluster_discovery", "读取紧凑观点片段后归纳一级观点簇；仅在片段语义不清时按source_id回查全文",
+            required_file=str(p["clusters"]), template=str(template), input_file=str(cluster_inputs[0]),
+            full_source_file=str(p["run"] / "retained_sources.jsonl"), binding_issue=cluster_issue,
         )
 
     override_inputs = [p["run"] / "retained_sources.jsonl", p["clusters"]]
@@ -1247,12 +1394,13 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
         command = [sys.executable, str(PIPELINE), "select", "--run", str(p["run"]), "--link-health", str(p["run"] / "source_link_health.json")]
         if p["source"].exists():
             command += ["--reviews", str(p["source"])]
-        if p["dedup"].exists():
+        if p["dedup"].exists() and bool(state.get("use_dedup_reviews")):
             command += ["--dedup-reviews", str(p["dedup"])]
         result = run_command(command)
         outputs = [
             p["run"] / "selection_summary.json",
             p["run"] / "retained_sources.jsonl",
+            p["run"] / "cluster_discovery_input.jsonl",
             p["run"] / "dedup_audit.json",
             p["run"] / "source_link_health.applied.json",
         ]

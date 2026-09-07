@@ -102,18 +102,20 @@ for _ in range(30):
             template["reviews"].append({
                 "source_id": item["id"], "decision": "retain_core",
                 "reason": "原文明确评价目标剧集的表演及人物关系，并给出眼神、停顿和动作等细节",
-                "evidence_position": [candidate["start"], candidate["end"]],
+                "evidence_candidate_index": candidate["candidate_index"],
             })
         dump(Path(state["required_file"]), template)
     elif stage == "dedup_review":
         template = load(Path(state["template"]))
-        audit = load(Path(state["input_file"]))
-        template["reviews"] = [
-            {"left_id": item["left_id"], "right_id": item["right_id"], "decision": "independent", "reason": "独立表达"}
-            for item in audit.get("medium_similarity_candidates", [])
-        ]
+        assert template["reviews"], "dedup template must prefill every candidate pair"
+        for item in template["reviews"]:
+            item["decision"] = "independent"
+            item["reason"] = "观点相近但作者与具体措辞独立"
         dump(Path(state["required_file"]), template)
     elif stage == "cluster_discovery":
+        discovery_rows = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert discovery_rows and "discovery_passages" in discovery_rows[0]
+        assert "body" not in discovery_rows[0] and state.get("full_source_file")
         template = load(Path(state["template"]))
         template["batches"]["电视剧《测试剧》"] = [{
             "id": "P01",
@@ -226,4 +228,10 @@ assert "--set-reviews" in cluster_set_command and "--member-reviews" not in clus
 assert "--set-reviews" in cluster_final_command and "--member-reviews" in cluster_final_command
 assert str(OUTPUT.resolve()) in manifest["stages"]["render_final"]["output_hashes"]
 assert str((WORKSPACE / "run" / "verification.json").resolve()) in manifest["stages"]["verify"]["output_hashes"]
+
+# An existing v1.1.1 workspace does not have the compact discovery file.  The
+# controller must regenerate selection outputs instead of crashing at cluster discovery.
+(WORKSPACE / "run" / "cluster_discovery_input.jsonl").unlink()
+upgrade_state = run("status", "--workspace", str(WORKSPACE))
+assert upgrade_state["status"] == "READY_TO_ADVANCE" and upgrade_state["stage"] == "select", upgrade_state
 print(json.dumps({"status": "PASS", "workspace": str(WORKSPACE), "output": str(OUTPUT), "verification": verification}, ensure_ascii=False, indent=2))
