@@ -3375,6 +3375,9 @@ def command_render(args: argparse.Namespace) -> None:
                 context_end = min(len(body), positions[-1][1] + 60)
                 promotion_markers = promotion_review_markers(excerpt)
                 short_excerpt = len(excerpt) < EXCERPT_PREFERRED_MIN
+                comparison_terms = target_layers(period_config["targets"][batch])[3]
+                work_conflict_markers = [term for term in comparison_terms if term and term in raw_excerpt]
+                target_review_required = final_alignment.get("target", {}).get("passed") is not True
                 semantic_input = {
                     "view_id": view_id, "source_id": row["id"], "batch": batch, "cluster_id": str(definition["id"]),
                     "cluster_title": definition["title"], "cluster_stance": definition["stance"],
@@ -3385,6 +3388,9 @@ def command_render(args: argparse.Namespace) -> None:
                     "promotion_markers": promotion_markers,
                     "excerpt_length": len(excerpt),
                     "short_excerpt": short_excerpt,
+                    "target_review_required": target_review_required,
+                    "work_consistency_review_required": bool(work_conflict_markers),
+                    **({"work_conflict_markers": work_conflict_markers} if work_conflict_markers else {}),
                 }
                 semantic_inputs.append(semantic_input)
                 semantic = semantic_reviews.get(view_id)
@@ -3402,15 +3408,24 @@ def command_render(args: argparse.Namespace) -> None:
                         reviewed_stance = clean(semantic.get("stance"))
                         if reviewed_stance != clean(definition["stance"]):
                             item_failures.append(f"摘录立场 {reviewed_stance or '空'} 与观点簇立场不一致")
-                        for field, label in (("target_passed", "目标作品"), ("aspect_passed", "评价方面"), ("work_consistency_passed", "作品内部信息一致性"), ("self_contained", "片段自足性")):
-                            if semantic.get(field) is not True:
-                                item_failures.append(f"{label}未通过独立语义复核")
-                        for field, label in (("target_evidence", "目标证据"), ("aspect_evidence", "方面证据"), ("stance_evidence", "立场证据"), ("work_consistency_evidence", "作品一致性证据")):
+                        if semantic.get("self_contained") is not True:
+                            item_failures.append("片段自足性未通过独立语义复核")
+                        for field, label in (("aspect_evidence", "方面证据"), ("stance_evidence", "立场证据")):
                             evidence = clean(semantic.get(field))
-                            evidence_scope = raw_excerpt if field in {"target_evidence", "work_consistency_evidence"} else excerpt
-                            if not evidence or evidence not in evidence_scope:
-                                scope_label = "后台逐字原文片段" if field in {"target_evidence", "work_consistency_evidence"} else "清洁后的最终摘录"
-                                item_failures.append(f"{label}不是{scope_label}中的逐字子串")
+                            if not evidence or evidence not in excerpt:
+                                item_failures.append(f"{label}不是清洁后的最终摘录中的逐字子串")
+                        if target_review_required:
+                            target_evidence = clean(semantic.get("target_evidence"))
+                            if semantic.get("target_passed") is not True:
+                                item_failures.append("脚本无法确认目标作品，AI复核也未通过")
+                            if not target_evidence or target_evidence not in raw_excerpt:
+                                item_failures.append("目标证据不是后台逐字原文片段中的子串")
+                        if work_conflict_markers:
+                            consistency_evidence = clean(semantic.get("work_consistency_evidence"))
+                            if semantic.get("work_consistency_passed") is not True:
+                                item_failures.append("摘录含对比作品，未确认目标作品内部信息一致性")
+                            if not consistency_evidence or consistency_evidence not in raw_excerpt:
+                                item_failures.append("作品一致性证据不是后台逐字原文片段中的子串")
                         if promotion_markers:
                             opinion_evidence = clean(semantic.get("opinion_evidence"))
                             if semantic.get("independent_opinion_passed") is not True:
@@ -3423,8 +3438,6 @@ def command_render(args: argparse.Namespace) -> None:
                             if not clean(semantic.get("short_excerpt_reason")):
                                 item_failures.append("不足70字的摘录缺少逐来源例外理由")
                             support_evidence = clean(semantic.get("specific_support_evidence"))
-                            if semantic.get("specific_support_passed") is not True:
-                                item_failures.append("不足70字的摘录未确认含有可复核的具体依据")
                             if not support_evidence or support_evidence not in excerpt:
                                 item_failures.append("不足70字的摘录缺少最终摘录中的逐字具体依据")
                     elif semantic_decision == "drop" and not item_failures:
@@ -3464,12 +3477,25 @@ def command_render(args: argparse.Namespace) -> None:
                                 "reassignment_reason": clean(semantic.get("reassignment_reason")),
                             })
                             continue
+                semantic_effective = dict(semantic or {})
                 if semantic:
-                    final_alignment["target"] = {**final_alignment["target"], "passed": semantic.get("target_passed") is True, "basis": "independent_final_excerpt_semantic_review", "review_evidence": clean(semantic.get("target_evidence"))}
-                    final_alignment["aspect"] = {**final_alignment["aspect"], "passed": semantic.get("aspect_passed") is True, "review_evidence": clean(semantic.get("aspect_evidence"))}
+                    if target_review_required:
+                        final_alignment["target"] = {**final_alignment["target"], "passed": semantic.get("target_passed") is True, "basis": "ai_final_target_review", "review_evidence": clean(semantic.get("target_evidence"))}
+                        semantic_effective["target_passed"] = semantic.get("target_passed") is True
+                        semantic_effective["target_basis"] = "ai_final_target_review"
+                    else:
+                        semantic_effective["target_passed"] = True
+                        semantic_effective["target_basis"] = "script_passage_alignment"
+                    semantic_effective["work_consistency_passed"] = (
+                        semantic.get("work_consistency_passed") is True if work_conflict_markers else True
+                    )
+                    semantic_effective["work_consistency_basis"] = (
+                        "ai_reviewed_comparison" if work_conflict_markers else "script_no_comparison_marker"
+                    )
+                    final_alignment["aspect"] = {**final_alignment["aspect"], "passed": bool(clean(semantic.get("aspect_evidence"))) and clean(semantic.get("aspect_evidence")) in excerpt, "basis": "ai_final_excerpt_review", "review_evidence": clean(semantic.get("aspect_evidence"))}
                     final_alignment["stance"] = {**final_alignment["stance"], "passed": clean(semantic.get("stance")) == clean(definition["stance"]), "reviewed": clean(semantic.get("stance")), "basis": "independent_final_excerpt_semantic_review", "review_evidence": clean(semantic.get("stance_evidence"))}
 
-                staged_item = {"viewId": view_id, "sourceId": row["id"], "channel": row["channel"], "author": row["author"], "title": row["title"], "publishedAt": row["published"], "url": safe_url(row["url"]), "excerpt": excerpt, "body": body, "sourceStance": row.get("stance", ""), "clusterStance": definition["stance"], "mediaAuthority": {"subjectId": row.get("media_subject_id", ""), "subjectName": row.get("media_subject_name", ""), "accountAlias": row.get("media_account_alias", ""), "accountType": row.get("media_account_type", ""), "tier": row.get("media_authority_tier", "unclassified"), "rank": int(row.get("media_authority_rank", 0)), "basis": row.get("media_authority_basis", "")}, "linkHealth": row.get("link_health", {}), "alignment": final_alignment, "semanticReview": semantic or {}, "factWarning": row.get("fact_warning", ""), "excerptProvenance": {"fragments": fragments, "positions": positions, "basis": basis, "displayNormalization": DISPLAY_NORMALIZATION}, "excerptLengthReview": {"length": len(excerpt), "preferredMin": EXCERPT_PREFERRED_MIN, "max": EXCERPT_MAX, "exception": short_excerpt, "reason": clean((semantic or {}).get("short_excerpt_reason")) if short_excerpt else "", "specificSupportPassed": (semantic or {}).get("specific_support_passed") is True if short_excerpt else True, "specificSupportEvidence": clean((semantic or {}).get("specific_support_evidence")) if short_excerpt else ""}}
+                staged_item = {"viewId": view_id, "sourceId": row["id"], "channel": row["channel"], "author": row["author"], "title": row["title"], "publishedAt": row["published"], "url": safe_url(row["url"]), "excerpt": excerpt, "body": body, "sourceStance": row.get("stance", ""), "clusterStance": definition["stance"], "mediaAuthority": {"subjectId": row.get("media_subject_id", ""), "subjectName": row.get("media_subject_name", ""), "accountAlias": row.get("media_account_alias", ""), "accountType": row.get("media_account_type", ""), "tier": row.get("media_authority_tier", "unclassified"), "rank": int(row.get("media_authority_rank", 0)), "basis": row.get("media_authority_basis", "")}, "linkHealth": row.get("link_health", {}), "alignment": final_alignment, "semanticReview": semantic_effective, "factWarning": row.get("fact_warning", ""), "excerptProvenance": {"fragments": fragments, "positions": positions, "basis": basis, "displayNormalization": DISPLAY_NORMALIZATION}, "excerptLengthReview": {"length": len(excerpt), "preferredMin": EXCERPT_PREFERRED_MIN, "max": EXCERPT_MAX, "exception": short_excerpt, "reason": clean((semantic or {}).get("short_excerpt_reason")) if short_excerpt else "", "specificSupportPassed": bool(clean((semantic or {}).get("specific_support_evidence"))) if short_excerpt else True, "specificSupportEvidence": clean((semantic or {}).get("specific_support_evidence")) if short_excerpt else ""}}
                 staged_items.append(staged_item)
                 if item_failures:
                     failures.extend({"view_id": view_id, "stage": "semantic", "issue": issue} for issue in item_failures)
@@ -3589,15 +3615,15 @@ def command_render(args: argparse.Namespace) -> None:
     )
     write_json(run_dir / "final_excerpt_review_contract.json", {
         "scope": "current_period_final_excerpt_review_contract",
-        "instruction": "逐条判断最终摘录是否指向目标作品、支持所在观点、立场一致、作品信息不冲突且可独立理解。优先保留70至150字并含完整判断和具体依据；短于70字先按 source_id 回查全文重截，无法补足时只有仍含具体可复核依据才可保留。泛泛态度、纯标签、纯促销、纯资料应删除。方面或立场错配时先转入合适观点簇。所有证据必须是输入指定文本范围中的逐字子串，不得改写。",
+        "instruction": "脚本已检查逐字位置、目标锚点、对比作品、长度和清洁标记。AI只判断最终摘录是否支持所在观点、立场是否一致、文字是否可独立理解；仅在输入明确标记 target_review_required 或 work_consistency_review_required 时补对应字段。优先保留70至150字并含完整判断和具体依据。",
         "allowed_decisions": ["keep", "drop"],
         "full_source_lookup_file": "retained_sources.jsonl",
         "evidence_scopes": {
-            "target_evidence": "raw_excerpt；若该字段省略则与 cleaned_excerpt 完全相同",
-            "work_consistency_evidence": "raw_excerpt；若该字段省略则与 cleaned_excerpt 完全相同",
             "aspect_evidence": "cleaned_excerpt",
             "stance_evidence": "cleaned_excerpt",
-            "specific_support_evidence": "cleaned_excerpt"
+            "specific_support_evidence": "cleaned_excerpt",
+            "target_evidence_when_required": "raw_excerpt；若该字段省略则与 cleaned_excerpt 完全相同",
+            "work_consistency_evidence_when_required": "raw_excerpt；若该字段省略则与 cleaned_excerpt 完全相同"
         },
         "preferred_length": [EXCERPT_PREFERRED_MIN, EXCERPT_MAX],
         "chunk_size": 60,
@@ -3741,10 +3767,11 @@ def command_verify(args: argparse.Namespace) -> None:
                     failures.append(f"缺少有效的独立最终摘录语义复核：{item['viewId']}")
                 if semantic.get("work_consistency_passed") is not True:
                     failures.append(f"作品内部信息一致性未通过：{item['viewId']}")
-                consistency_evidence = clean(semantic.get("work_consistency_evidence"))
-                raw_joined = clean(" ".join(fragment.strip() for fragment in fragments))
-                if not consistency_evidence or consistency_evidence not in raw_joined:
-                    failures.append(f"作品一致性证据不是后台逐字原文片段中的子串：{item['viewId']}")
+                if clean(semantic.get("work_consistency_basis")) == "ai_reviewed_comparison":
+                    consistency_evidence = clean(semantic.get("work_consistency_evidence"))
+                    raw_joined = clean(" ".join(fragment.strip() for fragment in fragments))
+                    if not consistency_evidence or consistency_evidence not in raw_joined:
+                        failures.append(f"作品一致性证据不是后台逐字原文片段中的子串：{item['viewId']}")
                 if "woa.com" in clean(item.get("url")).lower():
                     failures.append(f"禁止的内网链接：{item['viewId']}")
     if len(view_ids) != len(set(view_ids)):

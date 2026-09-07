@@ -1,6 +1,6 @@
 # film-brief-cleaning Skill
 
-当前发布版本：v1.1.3。仓库包含完整的 Skill 说明、执行脚本、复核契约、媒体主体库和离线工作台模板，可独立安装和运行。
+当前发布版本：v1.1.4。仓库包含完整的 Skill 说明、执行脚本、复核契约、媒体主体库和离线工作台模板，可独立安装和运行。
 
 用于清洗中文影视综艺舆情导出、发现当期观点簇、筛选可核验原文样本并生成离线 HTML 工作台的 Codex Skill。
 
@@ -35,11 +35,11 @@ $CODEX_HOME/skills/film-brief-cleaning/
 之后只反复运行 `advance`，并严格依据 `workflow_status.json` 行动：
 
 - `READY_TO_ADVANCE`：再次运行 `advance`。
-- `REVIEW_REQUIRED`：读取 `input_file(s)` 和 `review_requirements`，从 `template` 填写 `required_file`，原样保留 `_workflow`。
+- `REVIEW_REQUIRED`：只读取当前 `input_file` 和 `review_requirements`，从 `template` 填写 `required_file`，原样保留 `_workflow`；再次运行 `advance` 后再处理下一片。初次观点发现阶段需要依次读取完整 `input_files`。
 - `BROKEN` / `BLOCKED`：按状态中的结构化诊断修复，不得跳过关口或复用旧运行的评审文件。
 - `COMPLETE`：机器验收通过；交付前仍需打开 HTML 做视觉检查。
 
-较大的来源复核和最终摘录复核会自动拆成每批最多60条的 `input_files`；必须按文件名顺序处理完全部分片。模板内含允许值、证据范围和当前阶段约束。多轮 `cluster_overrides.json` 由控制器累计，当前轮只处理残余队列也不会丢失前轮答案。
+较大的来源复核和最终摘录复核会自动拆成每批最多60条；控制器每轮只发出下一片未完成内容，并由脚本账本累计各分片答案，执行模型不用重写历史记录。模板内含允许值、证据范围和当前阶段约束。多轮 `cluster_overrides.json` 也由控制器累计，当前轮只处理残余队列不会丢失前轮答案。
 
 正式输出路径只能由控制器在 `verify: PASS` 后写入。运行中自行制作、复制或改名得到的 HTML 不属于本 Skill 的结果，也无法得到 `COMPLETE`。
 

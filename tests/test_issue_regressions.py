@@ -365,13 +365,94 @@ assert not w.final_excerpt_review_is_filled(blank_excerpt_review)
 blank_excerpt_review.update({"decision": "keep", "reason": "已查看"})
 assert not w.final_excerpt_review_is_filled(blank_excerpt_review), "只有决定和理由不得跳过必填语义字段"
 blank_excerpt_review.update({
-    "target_passed": True, "target_evidence": "《测试剧》",
-    "aspect_passed": True, "aspect_evidence": "表演自然",
+    "aspect_evidence": "表演自然",
     "stance": "positive", "stance_evidence": "表演自然",
-    "work_consistency_passed": True, "work_consistency_evidence": "《测试剧》",
     "self_contained": True,
 })
 assert w.final_excerpt_review_is_filled(blank_excerpt_review)
+
+conditional_template = w.final_excerpt_review_template_payload(
+    "wf", [], [{
+        "view_id": "conditional::P01",
+        "target_review_required": True,
+        "work_consistency_review_required": True,
+    }]
+)
+conditional_input = {
+    "view_id": "conditional::P01",
+    "target_review_required": True,
+    "work_consistency_review_required": True,
+}
+conditional_review = conditional_template["reviews"]["conditional::P01"]
+conditional_review.update({
+    "decision": "keep", "reason": "已核对条件项",
+    "aspect_evidence": "表演自然", "stance": "positive",
+    "stance_evidence": "表演自然", "self_contained": True,
+})
+assert not w.final_excerpt_review_is_filled(conditional_review, conditional_input)
+conditional_review.update({
+    "target_passed": True, "target_evidence": "《测试剧》",
+    "work_consistency_passed": True, "work_consistency_evidence": "《测试剧》",
+})
+assert w.final_excerpt_review_is_filled(conditional_review, conditional_input)
+
+# Weak-model chunk submissions are accumulated by the controller, so a model
+# never has to rewrite prior answers or the full review file.
+ledger_root = Path(tempfile.mkdtemp(prefix="film-ledger-test-"))
+ledger_input = ledger_root / "ledger-input.jsonl"
+ledger_input.write_text('{"id":"s1"}\n{"id":"s2"}\n', encoding="utf-8")
+ledger_path = ledger_root / "source-ledger.json"
+first_submission = {
+    "scope": "current_period_source_fulltext_reviews",
+    "_workflow": w.binding("wf-ledger", [ledger_input]),
+    "reviews": [{
+        "source_id": "s1", "decision": "retain_core", "reason": "第一片有效",
+        "evidence_candidate_index": 1,
+    }],
+}
+first_ledger = w.cumulative_review_payload(
+    "wf-ledger", [ledger_input], first_submission, ledger_path,
+    "source_id", "current_period_source_fulltext_reviews",
+)
+w.write_json(ledger_path, first_ledger)
+second_submission = {
+    "scope": "current_period_source_fulltext_reviews",
+    "_workflow": w.binding("wf-ledger", [ledger_input]),
+    "reviews": [{
+        "source_id": "s2", "decision": "retain_consensus", "reason": "第二片有效",
+        "evidence_candidate_index": 1,
+    }],
+}
+second_ledger = w.cumulative_review_payload(
+    "wf-ledger", [ledger_input], second_submission, ledger_path,
+    "source_id", "current_period_source_fulltext_reviews",
+)
+assert set(w.list_review_map(second_ledger, "source_id")) == {"s1", "s2"}
+chunk_one = ledger_root / "chunk-001.jsonl"
+chunk_two = ledger_root / "chunk-002.jsonl"
+chunk_one.write_text('{"id":"s1"}\n', encoding="utf-8")
+chunk_two.write_text('{"id":"s2"}\n', encoding="utf-8")
+next_chunk, chunk_index, chunk_total = w.next_incomplete_chunk(
+    [chunk_one, chunk_two], "id", {"s2"}
+)
+assert next_chunk == chunk_two and chunk_index == 2 and chunk_total == 2
+override_submission = w.cluster_override_submission_template(
+    {
+        "scope": "current_period_source_cluster_reviews",
+        "_workflow": w.binding("wf-ledger", [ledger_input]),
+        "contract": {"cumulative_file": True},
+        "overrides": {"old": {"cluster": "P01", "reason": "历史记录"}},
+    },
+    [{"source_id": "new", "provisional_cluster": "P02"}],
+)
+assert set(override_submission["overrides"]) == {"new"}
+assert override_submission["contract"]["cumulative_file"] is False
+assert override_submission["contract"]["script_owned_cumulative_ledger"] is True
+
+malformed_review = ledger_root / "malformed-review.json"
+malformed_review.write_text('{"reviews": [', encoding="utf-8")
+malformed_payload = w.review_payload(malformed_review)
+assert w.binding_issue(malformed_payload, "wf-ledger", [ledger_input]).startswith("invalid_review_file:")
 
 
 print("PASS: issue-report regressions")

@@ -88,7 +88,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须填写当前来源专属的 `reason` 和证据。控制器在 `input_files` 中提供每批不超过60条且不超过约120KB的 `source_review_chunks/chunk-*.jsonl`；必须按文件名顺序覆盖全部分片。每条提供逐字候选、判断所需元数据和全文回查指针，不重复整篇正文与脚本中间量。优先填写 `evidence_candidate_index`；脚本会自动还原逐字原文及 `[start,end]`。候选均不能支撑实际决定时，才按 `full_source_lookup` 回查全文并填写连续逐字 `evidence` 或 `evidence_position`。`exclude` 的证据应直接支撑跨剧、无观点、纯推广或期次不符等理由。控制器会在链接检查之前生成 `source_review_validation.json`，一次列出全部缺失、越界或字段错误。证据格式错误时修正证据字段，不得为了绕过校验改变正确的语义决定。低于 `quality_floor` 但已经具备目标、判断和依据的来源进入 `retain_consensus`，质量分只影响排序。
+`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须填写当前来源专属的 `reason` 和证据。控制器每轮在 `input_file` 中提供下一批不超过60条且不超过约120KB的 `source_review_chunks/chunk-*.jsonl`；当前模板只含这一片待审项，提交后由脚本账本自动累计，重新运行 `advance` 后再接收下一片。每条提供逐字候选、判断所需元数据和全文回查指针，不重复整篇正文与脚本中间量。优先填写 `evidence_candidate_index`；脚本会自动还原逐字原文及 `[start,end]`。候选均不能支撑实际决定时，才按 `full_source_lookup` 回查全文并填写连续逐字 `evidence` 或 `evidence_position`。`exclude` 的证据应直接支撑跨剧、无观点、纯推广或期次不符等理由。控制器会在链接检查之前生成 `source_review_validation.json`，一次列出全部缺失、越界或字段错误。证据格式错误时修正证据字段，不得为了绕过校验改变正确的语义决定。低于 `quality_floor` 但已经具备“目标对象 + 评价判断 + 支撑依据”的来源进入 `retain_consensus`，质量分只影响排序。
 
 ## 同稿审计
 
@@ -198,7 +198,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 
 `required_any` 是自动归簇的初步路由词表，不要求穷尽所有同义表达。当前片段以不同措辞表达相同方面时，可在 `anchor_terms` 中填写片段里实际存在的评价短语；脚本只据此通过初步方面门，后续独立成员复核仍须判断其是否真正支持簇标题。默认 `anchor_terms` 只从相邻一至两句中选取成员片段。同一观点的完整判断确实分布在两个不相邻位置、且中间文字属于旁支或另一作品时，填写一至两个 `passage_fragments`；必须是本来源全文中按顺序、互不重叠的逐字原文。`passage_positions` 可省略，由脚本按原文顺序定位；原文中存在重复片段、需要消歧时再提供精确位置。第二观点使用 `secondary_passage_fragments` 与可选的 `secondary_passage_positions`。这些片段进入集合及成员指纹，并优先成为最终摘录候选，不能手工把两段改写成一个伪造连续句。
 
-该文件是**累计复核文件**。每轮都在已有 `overrides` 上补充或修改，不能只提交当轮残差。控制器同时维护绑定当前保留池和簇定义的 `cluster_overrides.ledger.json`：即使其他AI误把用户文件替换成仅含本轮记录的版本，执行时也会把此前已通过记录合并回来，当前同一来源ID的提交优先。
+当前模板只包含本轮最多60条残差，可以只提交当轮记录。控制器维护绑定当前保留池和簇定义的 `cluster_overrides.ledger.json`，自动合并此前已通过记录；当前同一来源ID的提交优先。执行模型不读取或复制账本，也不用维护累计大文件。
 
 明确不应进入工作台的来源可使用：
 
@@ -244,28 +244,21 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
   "reviews": {
     "来源ID::簇ID": {
       "decision": "keep",
-      "target_passed": true,
-      "target_evidence": "最终摘录中的目标作品或角色原文",
-      "aspect_passed": true,
       "aspect_evidence": "最终摘录中的评价方面原文",
       "stance": "positive",
       "stance_evidence": "最终摘录中的明确判断原文",
-      "work_consistency_passed": true,
-      "work_consistency_evidence": "最终摘录中能够确认作品内部信息一致的原文",
       "self_contained": true,
-      "short_excerpt_justified": false,
-      "short_excerpt_reason": "",
-      "specific_support_passed": false,
-      "specific_support_evidence": "",
-      "independent_opinion_passed": true,
-      "opinion_evidence": "最终摘录中能够独立成立的判断原文",
       "reason": "摘录独立支持本簇，未混入相反立场"
     }
   }
 }
 ```
 
-该文件只审核最终展示文字，不得复制归簇阶段的 `passage_stance` 作为结论。控制器在 `input_files` 中给出每批最多60条的 `final_excerpt_review_chunks/chunk-*.jsonl`；每条只含清洁摘录、必要时才出现的不同后台原文、摘录前后各最多60字上下文及必要元数据，完整来源仅在需要重截、转簇或核对跨作品时按 `source_id` 到 `retained_sources.jsonl` 回查。`raw_excerpt` 省略时表示它与 `cleaned_excerpt` 完全相同。证据范围统一写在 `final_excerpt_review_contract.json`：`target_evidence`、`work_consistency_evidence` 必须是后台原文的逐字子串；`aspect_evidence`、`stance_evidence`、`specific_support_evidence` 必须是 `cleaned_excerpt` 的逐字子串。合格样本使用 `decision: "keep"`。清洁后的摘录优先为70—150字；超过150字禁止保留，短于70字时必须先回看全文，仍无法补足同观点依据才填写短摘录例外及逐字具体依据。作品标签、人物名及“好看、封神、绝了、笑点拉满、期待”等泛泛态度不算具体依据。全文中没有可替换合格片段时使用 `decision:"drop"`，列明 `failed_checks` 并确认已经尝试重截；方面或立场失败还须尝试重新归簇，作品冲突须给全文逐字冲突证据。已审 `drop` 写入拒绝审计并从工作台省略；缺少结构化失败项、决定、理由或 keep 所需证据会阻止发布。终审不设每簇样本数量规则。`verify` 会再次核对语义复核、字符位置、边界和同来源片段重叠情况。
+该文件只审核最终展示文字，不得复制归簇阶段的 `passage_stance` 作为结论。控制器每轮在 `input_file` 中给出下一批最多60条的 `final_excerpt_review_chunks/chunk-*.jsonl`；当前模板只含这一片待审项，提交后由脚本账本自动累计。每条只含清洁摘录、必要时才出现的不同后台原文、摘录前后各最多60字上下文及必要元数据，完整来源仅在需要重截、转簇或核对跨作品时按 `source_id` 到 `retained_sources.jsonl` 回查。`raw_excerpt` 省略时表示它与 `cleaned_excerpt` 完全相同。
+
+普通 `keep` 只填 `decision`、`reason`、`aspect_evidence`、`stance`、`stance_evidence` 和 `self_contained`。脚本已经核对作品锚点、跨作品词、长度、标记清洁和逐字位置；仅当输入明确给出 `target_review_required:true` 或 `work_consistency_review_required:true` 时，模板才出现相应的通过值与逐字证据字段。短摘录和促销标记也只在脚本触发时增加条件字段。`aspect_evidence`、`stance_evidence`、`specific_support_evidence` 必须是 `cleaned_excerpt` 的逐字子串；条件性的 `target_evidence`、`work_consistency_evidence` 必须是后台原文的逐字子串。
+
+清洁后的摘录优先为70—150字；超过150字禁止保留，短于70字时必须先回看全文，仍无法补足同观点依据才填写短摘录例外及逐字具体依据。作品标签、人物名及“好看、封神、绝了、笑点拉满、期待”等泛泛态度不算具体依据。全文中没有可替换合格片段时使用 `decision:"drop"`，列明 `failed_checks` 并确认已经尝试重截；方面或立场失败还须尝试重新归簇，作品冲突须给全文逐字冲突证据。已审 `drop` 写入拒绝审计并从工作台省略；缺少结构化失败项、决定、理由或 keep 所需证据会阻止发布。终审不设每簇样本数量规则。`verify` 会再次核对语义复核、字符位置、边界和同来源片段重叠情况。
 
 若终审 drop 使实际非空簇数变化，控制器要求 `post_excerpt_cluster_count_reviews.json`。每批次以 `post_excerpt_cluster_count_review_input.json` 中的 `fingerprint` 为准，填写 `decision:"pass"`、实际 `cluster_count`、`range_status`、`reader_load_reviewed:true`、`no_forced_merge_or_split:true` 和具体 `reason`；9—16以外另填 `exception_approved:true` 与具体 `exception_reason`。该文件只审核终审后实际结果，不修改终审前的 `count_reviews`。
 

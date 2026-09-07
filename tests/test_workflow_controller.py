@@ -96,7 +96,8 @@ for _ in range(30):
         continue
     assert state["status"] == "REVIEW_REQUIRED" and state.get("review_requirements"), state
     if stage == "source_review":
-        assert state.get("input_files") and state.get("full_input_file")
+        assert state.get("input_file") and state.get("full_input_file")
+        assert state.get("chunk_index") == 1 and state.get("chunk_total") >= 1
         template = load(Path(state["template"]))
         queue = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
         assert queue and "evidence_source_text" not in queue[0]
@@ -175,21 +176,20 @@ for _ in range(30):
             }
         dump(Path(state["required_file"]), template)
     elif stage == "final_excerpt_review":
-        assert state.get("input_files") and state.get("full_input_file")
+        assert state.get("input_file") and state.get("full_input_file")
+        assert state.get("chunk_index") == 1 and state.get("chunk_total") >= 1
         template = load(Path(state["template"]))
         inputs = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
         template["reviews"] = {}
         for item in inputs:
             assert "body" not in item and "excerpt" not in item and "full_source_lookup" not in item
+            assert item["target_review_required"] is False
+            assert item["work_consistency_review_required"] is False
             excerpt = item["cleaned_excerpt"]
             template["reviews"][item["view_id"]] = {
-                "decision": "keep", "target_passed": True, "target_evidence": "《测试剧》",
-                "aspect_passed": True, "aspect_evidence": "表演细腻自然", "stance": "positive",
-                "stance_evidence": "表演细腻自然", "work_consistency_passed": True,
-                "work_consistency_evidence": "《测试剧》", "self_contained": True,
-                "short_excerpt_justified": False, "short_excerpt_reason": "", "specific_support_passed": False,
-                "specific_support_evidence": "", "independent_opinion_passed": True,
-                "opinion_evidence": "表演细腻自然", "reason": "最终摘录完整呈现判断和具体表演依据",
+                "decision": "keep", "aspect_evidence": "表演细腻自然", "stance": "positive",
+                "stance_evidence": "表演细腻自然", "self_contained": True,
+                "reason": "最终摘录完整呈现判断和具体表演依据",
             }
             assert len(excerpt) >= 70
         dump(Path(state["required_file"]), template)
