@@ -1685,11 +1685,16 @@ def reviewed_window(
     anchors = [clean(term) for term in override.get(anchor_key, []) if clean(term)]
     if fragments_value is None and positions_value is None:
         return best_window(row, definition, anchors, target_config)
-    if not isinstance(fragments_value, list) or not isinstance(positions_value, list):
-        raise ValueError(f"归簇双片段必须同时填写 {fragment_key} 和 {position_key}")
+    if not isinstance(fragments_value, list):
+        raise ValueError(f"归簇片段必须填写 {fragment_key} 数组")
     fragments = [str(value) for value in fragments_value]
     body = source_text(row)
-    positions = validate_fragment_positions(body, fragments, positions_value)
+    if positions_value is None:
+        positions = locate_fragments(body, fragments)
+    elif isinstance(positions_value, list):
+        positions = validate_fragment_positions(body, fragments, positions_value)
+    else:
+        raise ValueError(f"{position_key} 必须为位置数组；也可省略并由脚本按原文顺序定位")
     text = clean(" ".join(fragment.strip() for fragment in fragments))
     score, hits = cluster_score(text, row.get("title", ""), definition)
     strong_terms, weak_terms, _, comparisons = target_layers(target_config)
@@ -1786,7 +1791,17 @@ def passage_alignment(
 
     required = [clean(term) for term in definition.get("required_any", []) if clean(term)]
     aspect_hits = [term for term in required if term in text]
-    aspect_passed = not required or bool(aspect_hits)
+    # required_any is a routing vocabulary, not an exhaustive semantic list.
+    # A reviewed verbatim anchor may express the same aspect in different words;
+    # the later independent member review remains the semantic release gate.
+    reviewed_anchor_hits = [clean(term) for term in window.get("anchor_hits", []) if clean(term)]
+    aspect_passed = not required or bool(aspect_hits) or bool(override and reviewed_anchor_hits)
+    aspect_basis = (
+        "required_any_hit" if aspect_hits
+        else "ai_reviewed_anchor" if override and reviewed_anchor_hits
+        else "no_required_terms" if not required
+        else "missing_aspect_evidence"
+    )
 
     expected = clean(definition.get("stance"))
     inferred = stance(text)
@@ -1806,7 +1821,12 @@ def passage_alignment(
 
     return {
         "target": {"passed": target_passed, "basis": target_basis, "target_hits": target_hits, "strong_hits": strong_hits, "weak_hits": weak_hits, "comparison_hits": comparison_hits, "review_evidence": evidence},
-        "aspect": {"passed": aspect_passed, "hits": aspect_hits},
+        "aspect": {
+            "passed": aspect_passed,
+            "basis": aspect_basis,
+            "hits": aspect_hits,
+            "reviewed_anchor_hits": reviewed_anchor_hits,
+        },
         "stance": {"passed": stance_passed, "expected": expected, "inferred": inferred, "basis": stance_basis},
     }
 

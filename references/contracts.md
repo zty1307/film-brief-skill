@@ -242,7 +242,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 
 `secondary_cluster` 可省略。多剧文章或自动立场与簇不一致时，必须填写 `target_evidence` 和 `passage_stance`，且理由说明判断归属。不能为了增加样本数重复分配同一段文字。
 
-默认 `anchor_terms` 只从相邻一至两句中选取成员片段。同一观点的完整判断确实分布在两个不相邻位置、且中间文字属于旁支或另一作品时，可同时填写 `passage_fragments` 与 `passage_positions`；只允许一至两段，必须是本来源全文中按顺序、互不重叠的逐字原文。第二观点使用 `secondary_passage_fragments` 与 `secondary_passage_positions`。控制器会在归簇前一次性核对数量、位置、顺序和逐字一致性；这些片段进入集合及成员指纹，并优先成为最终摘录候选，不能手工把两段改写成一个伪造连续句。
+`required_any` 是自动归簇的初步路由词表，不要求穷尽所有同义表达。当前片段以不同措辞表达相同方面时，可在 `anchor_terms` 中填写片段里实际存在的评价短语；脚本只据此通过初步方面门，后续独立成员复核仍须判断其是否真正支持簇标题。默认 `anchor_terms` 只从相邻一至两句中选取成员片段。同一观点的完整判断确实分布在两个不相邻位置、且中间文字属于旁支或另一作品时，填写一至两个 `passage_fragments`；必须是本来源全文中按顺序、互不重叠的逐字原文。`passage_positions` 可省略，由脚本按原文顺序定位；原文中存在重复片段、需要消歧时再提供精确位置。第二观点使用 `secondary_passage_fragments` 与可选的 `secondary_passage_positions`。这些片段进入集合及成员指纹，并优先成为最终摘录候选，不能手工把两段改写成一个伪造连续句。
 
 该文件是**累计复核文件**。每轮都在已有 `overrides` 上补充或修改，不能只提交当轮残差。控制器同时维护绑定当前保留池和簇定义的 `cluster_overrides.ledger.json`：即使其他AI误把用户文件替换成仅含本轮记录的版本，执行时也会把此前已通过记录合并回来，当前同一来源ID的提交优先。
 

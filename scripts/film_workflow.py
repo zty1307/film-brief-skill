@@ -64,7 +64,7 @@ ALLOWED_CLUSTER_EXCLUSION_REASONS = {
 STAGE_GUIDANCE = {
     "period_config": [
         "逐批次确认 serial_drama 或 episodic_variety，并填写真实监测时间窗",
-        "strong_terms 只放能独立确认作品的全名或已核验唯一简称；演员、嘉宾、角色放 auxiliary_terms",
+        "strong_terms 只放能独立确认作品的全名或已核验唯一简称；与常见词重合的裸片名放 weak_terms，演员、嘉宾、角色放 auxiliary_terms",
         "同期对比作品放 comparison_terms；不得复制旧期聚类、旧报告点位或样本数量预算",
     ],
     "source_review": [
@@ -83,6 +83,7 @@ STAGE_GUIDANCE = {
     ],
     "cluster_assignment_review": [
         "逐条核对目标作品、评价方面、当前片段立场和连续逐字证据",
+        "required_any 未穷尽同义表达时，用当前片段中的逐字 anchor_terms 通过初步方面门，后续成员复核仍须独立判断语义",
         "cluster_overrides.json 是累计文件；控制器会合并此前已通过记录，当前同ID提交优先",
         "片段有效但归错簇时应移动、缩窄簇名或建立有数据支持的新簇；明确跨剧、无观点、攻击噪声或纯推广可用 cluster=__exclude__ 并给逐字证据",
         "同一来源进入第二簇时，两段原文必须互不重叠且分别形成完整观点",
@@ -491,19 +492,48 @@ def cluster_override_validation_issues(
                     "required_fix": "只有填写 secondary_cluster 时才能提交 secondary_passage_fragments/positions",
                 })
                 continue
-            if not isinstance(fragments, list) or not isinstance(positions, list):
+            if not isinstance(fragments, list):
                 issues.append({
                     "source_id": source_id,
                     "issue": f"{prefix}passage_fragments_positions_incomplete",
-                    "required_fix": f"{fragment_key} 与 {position_key} 必须同时填写为数组",
+                    "required_fix": f"必须填写 {fragment_key} 数组；{position_key} 可省略并由脚本按原文顺序定位",
                 })
                 continue
-            if not 1 <= len(fragments) <= 2 or len(fragments) != len(positions):
+            if positions is not None and not isinstance(positions, list):
+                issues.append({
+                    "source_id": source_id,
+                    "issue": f"{prefix}passage_positions_invalid",
+                    "required_fix": f"{position_key} 必须为数组；也可省略并由脚本定位",
+                })
+                continue
+            if not 1 <= len(fragments) <= 2 or (positions is not None and len(fragments) != len(positions)):
                 issues.append({
                     "source_id": source_id,
                     "issue": f"{prefix}passage_fragments_positions_count_invalid",
                     "required_fix": "归簇证据只允许一至两段，片段数与位置数必须一致",
                 })
+                continue
+            if positions is None:
+                cursor = 0
+                for index, fragment in enumerate(fragments):
+                    if not isinstance(fragment, str) or not fragment:
+                        issues.append({
+                            "source_id": source_id,
+                            "issue": f"{prefix}passage_fragment_invalid",
+                            "fragment_index": index,
+                            "required_fix": "片段必须是非空的原文字符串",
+                        })
+                        continue
+                    start = full_text.find(fragment, cursor)
+                    if start < 0:
+                        issues.append({
+                            "source_id": source_id,
+                            "issue": f"{prefix}passage_fragment_not_verbatim_or_out_of_order",
+                            "fragment_index": index,
+                            "required_fix": "片段必须能在本来源全文中按提交顺序逐字定位",
+                        })
+                        continue
+                    cursor = start + len(fragment)
                 continue
             previous_end = 0
             for index, (fragment, position) in enumerate(zip(fragments, positions)):
@@ -584,7 +614,7 @@ def cumulative_override_payload(
             ],
             "two_span_passage": {
                 "optional_fields": ["passage_fragments", "passage_positions"],
-                "rule": "provide both; one or two verbatim spans in source order, non-overlapping",
+                "rule": "provide one or two verbatim passage_fragments in source order; passage_positions is optional and is located by script when omitted",
                 "secondary_fields": ["secondary_passage_fragments", "secondary_passage_positions"],
             },
             "display_exclusion": {

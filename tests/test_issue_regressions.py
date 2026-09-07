@@ -48,6 +48,29 @@ window = p.best_window(
 )
 assert "眼神和停顿" in window["text"] and window["anchor_hits"]
 
+# required_any is only a routing vocabulary. A verbatim reviewed anchor may
+# express the same aspect with different wording, while an unreviewed miss must
+# still fail the preliminary gate.
+semantic_definition = {
+    "id": "P02", "title": "肯定场景营造出的武侠质感",
+    "stance": "positive", "required_any": ["古早武侠", "武侠味"],
+}
+semantic_text = "《测试剧》把黄沙、旧城与人物的风霜感拍得很落地。"
+semantic_window = {
+    "start": 0, "end": len(semantic_text), "text": semantic_text,
+    "anchor_hits": ["风霜感拍得很落地"],
+}
+semantic_row = {"id": "semantic", "title": "《测试剧》", "body": semantic_text, "decision": "retain_consensus"}
+semantic_target = {"strong_terms": ["《测试剧》"], "weak_terms": [], "auxiliary_terms": [], "comparison_terms": []}
+alignment = p.passage_alignment(
+    semantic_row, semantic_window, semantic_definition, semantic_target,
+    {"anchor_terms": ["风霜感拍得很落地"], "passage_stance": "positive"},
+)
+assert alignment["aspect"]["passed"] and alignment["aspect"]["basis"] == "ai_reviewed_anchor"
+assert not p.passage_alignment(
+    semantic_row, {**semantic_window, "anchor_hits": []}, semantic_definition, semantic_target, {}
+)["aspect"]["passed"]
+
 
 # A coherent viewpoint may use two non-adjacent verbatim spans before the
 # cluster-set gate; intervening cross-work text must not enter the passage.
@@ -77,6 +100,16 @@ two_span_window = p.reviewed_window(
 assert two_span_window["reviewed_fragments"] is True
 assert "对比剧" not in two_span_window["text"]
 assert p.excerpt_candidates(two_span_body, two_span_window, definition)[0]["fragments"] == [first_fragment, second_fragment]
+
+# Models may omit character offsets; the script locates exact fragments in
+# source order. Explicit positions remain available when repeated text needs
+# disambiguation.
+auto_position_override = {key: value for key, value in two_span_override.items() if key != "passage_positions"}
+auto_position_window = p.reviewed_window(
+    two_span_row, definition, auto_position_override,
+    {"strong_terms": ["测试剧"], "weak_terms": [], "auxiliary_terms": [], "comparison_terms": ["对比剧"]},
+)
+assert auto_position_window["positions"] == two_span_override["passage_positions"]
 
 
 # Wrong-work character sets and abusive text route to AI review, never auto-pass silently.
@@ -218,6 +251,10 @@ with tempfile.TemporaryDirectory() as td:
     valid_two_span_payload = {"overrides": {"two-span": two_span_override}}
     assert not w.cluster_override_validation_issues(
         [retained_two_span], cluster_payload, valid_two_span_payload
+    )
+    auto_position_payload = {"overrides": {"two-span": auto_position_override}}
+    assert not w.cluster_override_validation_issues(
+        [retained_two_span], cluster_payload, auto_position_payload
     )
     invalid_two_span_payload = json.loads(json.dumps(valid_two_span_payload, ensure_ascii=False))
     invalid_two_span_payload["overrides"]["two-span"]["passage_positions"][1][0] -= 1
