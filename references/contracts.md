@@ -67,7 +67,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-`check_links.py` 必须覆盖 `normalized_sources.jsonl` 中全部非空URL；`select --link-health` 缺少任一链接结果时拒绝继续。只有两次GET均返回404或410的 `confirmed_dead` 会硬排除来源。`reachable` 只说明检查时能访问；`indeterminate` 包括401、403、429、登录墙、反爬、5xx、DNS错误和超时，不能据此删除。`blocked` 不发起网络请求，禁用域名及重定向到禁用域名均按此记录。
+来源复核通过后，控制器生成 `source_link_candidates.jsonl`。`check_links.py` 只检查其中仍可能保留的非空URL；`select --link-health` 若发现任一仍可能保留的URL未覆盖则拒绝继续。只有两次GET均返回404或410的 `confirmed_dead` 会硬排除来源。`reachable` 只说明检查时能访问；`indeterminate` 包括401、403、429、登录墙、反爬、5xx、DNS错误和超时，不能据此删除。`blocked` 不发起网络请求。
 
 ## `source_reviews.json`
 
@@ -88,25 +88,11 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须填写当前来源专属的 `reason` 和证据。优先填写 `evidence_candidate_index`，从同一队列项的 `review_evidence_candidates` 中选择编号；脚本会自动还原逐字原文及 `[start,end]`，无需手算位置。候选均不能支撑实际决定时，才填写连续逐字 `evidence` 或 `evidence_position`。`exclude` 的证据应直接支撑“跨剧、无观点、纯推广、期次不符”等排除理由。位置基准是队列给出的 `evidence_source_text`。来源复核文件必须覆盖 `source_review_queue.jsonl` 的全部项目；控制器会在耗时的链接检查之前生成 `source_review_validation.json`，一次列出全部缺失、越界或字段错误，并给出可选候选编号。证据格式错误时修正证据字段，不得为了绕过校验改变正确的语义决定。低于 `quality_floor` 但已经具备目标、判断和依据的来源进入 `retain_consensus`，质量分只影响排序。
+`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须填写当前来源专属的 `reason` 和证据。控制器在 `input_files` 中提供每批不超过60条且不超过约120KB的 `source_review_chunks/chunk-*.jsonl`；必须按文件名顺序覆盖全部分片。每条提供逐字候选、判断所需元数据和全文回查指针，不重复整篇正文与脚本中间量。优先填写 `evidence_candidate_index`；脚本会自动还原逐字原文及 `[start,end]`。候选均不能支撑实际决定时，才按 `full_source_lookup` 回查全文并填写连续逐字 `evidence` 或 `evidence_position`。`exclude` 的证据应直接支撑跨剧、无观点、纯推广或期次不符等理由。控制器会在链接检查之前生成 `source_review_validation.json`，一次列出全部缺失、越界或字段错误。证据格式错误时修正证据字段，不得为了绕过校验改变正确的语义决定。低于 `quality_floor` 但已经具备目标、判断和依据的来源进入 `retain_consensus`，质量分只影响排序。
 
-## `dedup_reviews.json`
+## 同稿审计
 
-```json
-{
-  "scope": "current_period_copy_reviews",
-  "reviews": [
-    {
-      "left_id": "来源ID一",
-      "right_id": "来源ID二",
-      "decision": "independent",
-      "reason": "观点相近，但论据、措辞和作者表达独立"
-    }
-  ]
-}
-```
-
-`decision` 仅允许 `same_copy` 或 `independent`，每对必须填写具体 `reason`。控制器生成的 `dedup_reviews.template.json` 已预填全部 `left_id/right_id`；模型保持ID不动，只补两个字段。`dedup_review_queue.unresolved.jsonl` 同时提供左右来源的作者、渠道、标题和紧凑对照文字，无需从全量来源文件重新组装候选。高阈值文本重复默认合并；中等相似候选默认保留，AI确认共享同一稿件骨架后才合并。
+完全相同和高置信同稿由脚本合并，结果写入 `dedup_audit.json`。中等相似候选默认保留为独立表达，并继续留在审计文件中；生产控制器不要求模型逐对填写去重决定。
 
 ## `cluster_definitions.json`
 
@@ -131,9 +117,9 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-每个批次必须至少一个簇；ID在批次内唯一；`stance` 必须是 `positive`、`objective`、`negative` 之一；标题应是能直接理解的完整报告体观点句，并按实现要求以报告谓语开头，或在逗号后的判断分句使用明确谓语。“演员表现”“剧情张力”一类短标签不合格。负向簇可填写 `negative_cues` 辅助自动发现；它只用于未复核条目的路由，AI已用 `passage_stance` 和逐字证据确认的负面片段不会因未命中固定词表而被否决。客观舆情概况可设 `objective_meta: true`。不要求每个批次三种立场齐全，也不要求每簇达到任何样本数量。
+每个批次必须至少一个簇；ID在批次内唯一；`stance` 必须是 `positive`、`objective`、`negative` 之一；标题应是能直接理解的完整报告体观点句。“演员表现”“剧情张力”一类短标签不合格。每个非背景簇须在 `required_any` 填1—4个方面词或短语；作品名、演员名、角色名以及“剧情、热度、好看”等通用词不能单独承担归簇。作品名不增加观点得分，人物名只给极低辅助权重。负向簇可填写 `negative_cues` 辅助自动发现。客观舆情概况可设 `objective_meta: true`。不要求每个批次三种立场齐全，也不要求每簇达到任何样本数量。
 
-初次观点发现读取 `cluster_discovery_input.jsonl`。每条只包含一个当前来源的逐字候选片段、来源ID及必要元数据；若片段不足以确认语义或作品归属，再按 `source_id` 到 `retained_sources.jsonl` 回查该条全文。该紧凑文件只降低读取负担，不改变来源去留，也不代替后续逐成员全文核验。
+初次观点发现依次读取控制器 `input_files` 指向的 `cluster_discovery_chunks/chunk-*.jsonl`。这些片段按立场和渠道分层抽取，每批最多180条；它只压缩初次发现的阅读量，不删除保留来源。全量来源随后都会归簇并接受覆盖检查。若片段不足以确认语义或作品归属，再按 `source_id` 到 `retained_sources.jsonl` 回查全文。若方面错配达到阈值，`cluster_definition_gap_samples.jsonl` 给出最多40条代表缺口，先修改簇定义，再处理少量残余归簇。
 
 ## `cluster_set_reviews.json`
 
@@ -153,16 +139,6 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
           "supporting_source_ids": ["来源ID一", "来源ID二"]
         }
       ],
-      "member_support": {
-        "来源ID一": {
-          "claim_indices": [0],
-          "evidence": "公安系统里每一个不被大众熟知的岗位，都被镜头温柔且细致地记录下来"
-        },
-        "来源ID二": {
-          "claim_indices": [0],
-          "evidence": "剧中每个警种都有涉及，每个人物的刻画都紧贴现实"
-        }
-      },
       "stance_purity_passed": true,
       "scope_purity_passed": true,
       "scope_reason": "均为播出后对当前剧情的评价",
@@ -192,33 +168,9 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 
 第一次运行 `cluster` 后生成 `cluster_set_review_input.json`。审查键固定为“批次名 + 制表符 + 簇ID”，`fingerprint` 必须逐字复制本次输入；标题、立场或成员来源变化都会令旧审查失效。每个非空簇必须覆盖。`report_role` 仅允许 `report_point`、`subtopic`、`data_note`、`rare_signal`；`data_note` 必须使用 `objective` 立场。角色只帮助人工理解观点在报告中的用途，不形成页面层级，也不影响来源去留。
 
-`title_claims` 要把簇标题中的并列判断拆开，每项至少列出一个实际簇内来源ID，并且所有 `supporting_source_ids` 的并集必须覆盖该簇全部成员。`member_support` 还必须逐条覆盖全部成员：`evidence` 是该成员当前分配片段中的连续原文，`claim_indices` 指向它实际支持的 `title_claims` 序号。脚本会核对原文包含关系、索引有效性和双向对应，单纯把全部ID复制进支持列表无法通过。分句分别有证据只证明标题覆盖，集合复核还必须确认成员共享同一评价关系或因果机制；不得用“并且”“也肯定”或“都提升吸引力”等宽泛结果连接互不推出的判断。聚类以当前分配片段为语义边界；全文只用于判定对象、范围、来源角色或重新截取，不能把当前片段没有表达的全文词语带入簇名。`stance_purity_passed` 检查局部摘录立场；`scope_purity_passed` 检查时间或期次纯度。电视剧的 `scope_type` 取 `pre_broadcast_expectation`、`current_broadcast_reaction`、`later_reputation`、`mixed_time_explicit`；曝光片段、路透或预告解读属于播前范围，不能按发布日期直接算作开播后观感。综艺取 `latest_episode`、`previous_episode_prominent`、`program_level_current`、`mixed_scope_explicit`。`granularity_passed` 同时检查大簇混合多个方面和小簇仅按人物、段子机械切碎；`source_role_checked` 检查官方、节目参与者、宣传稿与独立受众表达。客观簇还必须填写 `objective_purity_passed:true`，以及 `objective_subtype` 为 `neutral_fact`、`sentiment_distribution`、`balanced_observation` 之一。`data_note` 必须记录与本期分析相关的具体事实或背景，不能用“未形成完整评价”“当前片段中的相关事实”“当前片段直接表达正向/负向判断”等兜底标题收容难归类或无观点、无相关信息的片段。任何项未通过时先修改簇定义或成员归属，再重新生成指纹和审查，不能用解释文字绕过。
+`cluster_set_review_input.json` 每簇最多给出8条代表样本，完整成员ID仍进入 `fingerprint`。`title_claims` 要把簇标题中的并列判断拆开，每项至少列出一个实际簇内来源ID。集合复核确认共享评价机制、立场、范围、来源角色和颗粒度；它不再要求复制全部成员的逐条证据。逐样本的对象、方面、立场、作品一致性和自足性统一在 `final_excerpt_semantic_reviews.json` 中完成。电视剧的 `scope_type` 取 `pre_broadcast_expectation`、`current_broadcast_reaction`、`later_reputation`、`mixed_time_explicit`；综艺取 `latest_episode`、`previous_episode_prominent`、`program_level_current`、`mixed_scope_explicit`。客观簇还须填写 `objective_purity_passed:true` 和合法 `objective_subtype`。任何项未通过时先修改簇定义或成员归属，再重新生成指纹。
 
 `count_reviews` 是页面生成前的整期簇数审查。脚本从全部非空最终簇、簇名、立场和成员计算批次指纹。普通单期9—16个簇时使用 `within_range`；低于9个或高于16个时分别使用 `below_range`、`above_range`，并设置 `exception_approved:true` 和不少于12个规范化字符的 `exception_reason`，具体说明为何继续拆分或合并会损害语义质量。每期都必须确认已经检查过度切碎、过度宽泛和机械调数。该审查不改变成员，也不能代替逐簇证据审查；脚本不会为了达标自动调整观点。`cluster_count_review_queue.unresolved.jsonl` 非空时，`render` 和 `verify` 均不得发布。
-
-## `cluster_member_semantic_reviews.json`
-
-```json
-{
-  "scope": "current_period_cluster_member_semantic_reviews",
-  "reviews": {
-    "剧名 第一期\tP01\t来源ID一": {
-      "fingerprint": "从 cluster_member_semantic_review_input.json 原样复制",
-      "decision": "pass",
-      "target_passed": true,
-      "title_support_passed": true,
-      "stance_passed": true,
-      "scope_checked": true,
-      "source_role_checked": true,
-      "supported_claim_indices": [0],
-      "evidence": "当前分配片段中直接支撑簇名的连续原文",
-      "reason": "说明这段原文如何支撑标题，而非只复述题材词"
-    }
-  }
-}
-```
-
-该文件用于聚类完成后的独立成员级语义复核，应由未参与本轮簇命名的第二个AI执行，或在清空前轮推理上下文后重新审核。审查对象固定为“当前分配片段 + 当前簇名 + 当前立场”；全文只辅助确认对象、期次和来源角色，不能替当前片段补造观点。每条复核的 `fingerprint` 绑定簇名、立场、来源ID和片段，任何一项变化都会令旧审查失效。`evidence` 必须是当前片段的连续原文，`supported_claim_indices` 必须指向该簇的 `title_claims`。如果片段只与标题共享人物名或题材词，却没有表达同一判断，必须退回重归簇、缩窄标题或重截，不能填写 `pass`。`cluster_member_semantic_review_queue.unresolved.jsonl` 非空时，`render` 和 `verify` 均拒绝通过。
 
 ## `cluster_overrides.json`
 
@@ -263,7 +215,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 
 排除证据优先写入 `exclusion_evidence`；为兼容不同执行模型，也接受同义字段 `evidence`。内容必须从该来源全文连续逐字复制，不能写总结。控制器会在正式归簇前一次列出全部缺字段、非法代码、未知簇和非逐字证据，并保持 `REVIEW_REQUIRED`，不会把这类可修复输入错误报成 `BROKEN`。
 
-`cluster_review_queue.jsonl` 的 `issue` 用于说明复核原因：`passage_stance_conflict` 为局部立场与簇冲突，`negative_cluster_missing_negative_cue` 为未复核负面窗口未命中辅助词，`small_top_two_margin` 为前两簇分差小，`no_positive_cluster_evidence` 或 `low_cluster_evidence` 为当前窗口缺少足够簇证据，`multi_work_passage_requires_review` 为同段涉及多作品，`no_passage_target_anchor` 为局部未重复作品锚点。提供精确 `anchor_terms` 时，脚本优先选择含锚点的窗口，再用同来源 `target_evidence` 处理作品归属。
+`cluster_review_queue.jsonl` 的 `issue` 用于说明复核原因：`passage_stance_conflict` 为局部立场与簇冲突，`negative_cluster_missing_negative_cue` 为未复核负面窗口未命中辅助词，`no_positive_cluster_evidence` 或 `low_cluster_evidence` 为当前窗口缺少足够簇证据，`multi_work_passage_requires_review` 为同段涉及多作品，`no_passage_target_anchor` 为局部未重复作品锚点。两个相近观点分差小时默认采用得分更高者，不单独阻塞；代表样本审核仍会检查簇边界。提供精确 `anchor_terms` 时，脚本优先选择含锚点的窗口，再用同来源 `target_evidence` 处理作品归属。
 
 ## `excerpt_reviews.json`
 
@@ -313,7 +265,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-该文件只审核最终展示文字，不得复制归簇阶段的 `passage_stance` 作为结论。输入逐条同时提供 `raw_excerpt`、`cleaned_excerpt`、`full_source_text` 和 `evidence_scopes`，无需猜测校验范围：`target_evidence`、`work_consistency_evidence` 必须是 `raw_excerpt` 的逐字子串，允许使用显示清洗前的话题标签确认作品；`aspect_evidence`、`stance_evidence`、`specific_support_evidence` 必须是 `cleaned_excerpt` 的逐字子串，确保读者实际看见的文字能够支撑观点。合格样本使用 `decision: "keep"`。清洁后的摘录优先为70—150字；超过150字禁止保留，短于70字时必须先回看全文，仍无法补足同观点依据才填写 `short_excerpt_justified:true` 和具体 `short_excerpt_reason`，同时必须填写 `specific_support_passed:true` 和最终摘录中的逐字 `specific_support_evidence`。作品标签、人物名及“好看、封神、绝了、笑点拉满、期待”等泛泛态度不算具体依据；全文再无信息时使用 `decision:"drop"`，并在 `failed_checks` 中填写 `evidence_specificity`。当输入中的 `promotion_markers` 非空时，还必须填写 `independent_opinion_passed:true` 和最终摘录中的逐字 `opinion_evidence`，纯抽奖、购票、报名、扫码、礼包、活动规则或演员资料不能通过。全文中没有可替换合格片段时，可使用 `{"decision":"drop","failed_checks":["aspect"],"reexcerpt_attempted":true,"reassignment_attempted":true,"reassignment_reason":"全文只有排播信息，不存在可转入其他簇的目标作品评价","reason":"回看全文后只找到排播信息，没有形成任何可用观点"}`。`failed_checks` 只允许 `target`、`aspect`、`stance`、`self_contained`、`work_consistency`、`evidence_specificity`；若包含 `aspect` 或 `stance`，必须填写 `reassignment_attempted:true` 和逐来源 `reassignment_reason`，说明为何无法转入其他现有簇或形成新簇；若包含 `work_consistency`，还须提供全文中的逐字 `conflict_evidence`。`reviews` 可使用以 `viewId` 为键的对象，也可使用每项带 `view_id` 的列表；列表不得误用 `source_id`。已审 `drop` 写入 `excerpt_semantic_review_rejected.jsonl` 并从工作台省略，不算未决项；脚本会剥离理由中的逐条引文后检查模板复用。终审不设每簇样本数量规则；缺少结构化失败项、缺少决定与理由或 keep 所需证据会阻止发布。簇级结果写入 `cluster_display_coverage_audit.json`。首次 `render` 可以在缺少该文件时生成 `excerpt_semantic_review_input.jsonl`；完成复核后再次运行。`verify` 会再次核对语义复核、字符位置、边界、引号和同来源片段重叠情况。
+该文件只审核最终展示文字，不得复制归簇阶段的 `passage_stance` 作为结论。控制器在 `input_files` 中给出每批最多60条的 `final_excerpt_review_chunks/chunk-*.jsonl`；每条只含清洁摘录、必要时才出现的不同后台原文、摘录前后各最多60字上下文及必要元数据，完整来源仅在需要重截、转簇或核对跨作品时按 `source_id` 到 `retained_sources.jsonl` 回查。`raw_excerpt` 省略时表示它与 `cleaned_excerpt` 完全相同。证据范围统一写在 `final_excerpt_review_contract.json`：`target_evidence`、`work_consistency_evidence` 必须是后台原文的逐字子串；`aspect_evidence`、`stance_evidence`、`specific_support_evidence` 必须是 `cleaned_excerpt` 的逐字子串。合格样本使用 `decision: "keep"`。清洁后的摘录优先为70—150字；超过150字禁止保留，短于70字时必须先回看全文，仍无法补足同观点依据才填写短摘录例外及逐字具体依据。作品标签、人物名及“好看、封神、绝了、笑点拉满、期待”等泛泛态度不算具体依据。全文中没有可替换合格片段时使用 `decision:"drop"`，列明 `failed_checks` 并确认已经尝试重截；方面或立场失败还须尝试重新归簇，作品冲突须给全文逐字冲突证据。已审 `drop` 写入拒绝审计并从工作台省略；缺少结构化失败项、决定、理由或 keep 所需证据会阻止发布。终审不设每簇样本数量规则。`verify` 会再次核对语义复核、字符位置、边界和同来源片段重叠情况。
 
 若终审 drop 使实际非空簇数变化，控制器要求 `post_excerpt_cluster_count_reviews.json`。每批次以 `post_excerpt_cluster_count_review_input.json` 中的 `fingerprint` 为准，填写 `decision:"pass"`、实际 `cluster_count`、`range_status`、`reader_load_reviewed:true`、`no_forced_merge_or_split:true` 和具体 `reason`；9—16以外另填 `exception_approved:true` 与具体 `exception_reason`。该文件只审核终审后实际结果，不修改终审前的 `count_reviews`。
 

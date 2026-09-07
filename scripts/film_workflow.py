@@ -31,11 +31,9 @@ LOCK_NAME = "workflow.lock"
 
 REVIEW_FILES = {
     "source": "source_reviews.json",
-    "dedup": "dedup_reviews.json",
     "clusters": "cluster_definitions.json",
     "overrides": "cluster_overrides.json",
     "set": "cluster_set_reviews.json",
-    "members": "cluster_member_semantic_reviews.json",
     "excerpts": "excerpt_reviews.json",
     "semantic": "final_excerpt_semantic_reviews.json",
     "post_count": "post_excerpt_cluster_count_reviews.json",
@@ -68,43 +66,33 @@ STAGE_GUIDANCE = {
         "同期对比作品放 comparison_terms；不得复制旧期聚类、旧报告点位或样本数量预算",
     ],
     "source_review": [
-        "逐条阅读队列中的完整标题、正文、ASR及必要父帖上下文，不凭标题或关键词单独判断",
+        "逐条阅读分片中的逐字候选和必要父帖上下文；只有候选不足以判断时才按 source_id 回查完整来源",
         "retain 与 exclude 都必须填写具体理由；优先填写 evidence_candidate_index 选择脚本候选，候选均不适用时再提供逐字 evidence 或 evidence_position",
         "证据格式错误时只修证据字段，不得为了通过校验把 retain 改成 exclude",
         "相同观点的独立作者均可保留；综艺还须核对最新一期、前一期当周突出话题或节目级讨论",
     ],
-    "dedup_review": [
-        "模板已预填全部 left_id/right_id，保持ID不动，只填写 decision 和逐对 reason",
-        "只有转载、同稿跨平台分发、洗稿或共享明确稿件骨架才标 same_copy",
-        "不同作者独立表达相近观点标 independent，不能因为观点相似而删除",
-    ],
     "cluster_discovery": [
-        "先通读 cluster_discovery_input 的紧凑逐字片段；仅在片段语义不清时按 source_id 回查 retained_sources 全文",
+        "按顺序通读 cluster_discovery_chunks 中的分层抽样逐字片段；仅在片段语义不清时按 source_id 回查 retained_sources 全文",
         "只依据本期数据归纳一级观点，不读取人工成品反推答案",
         "标题写成可直接理解的报告体判断句，并明确 positive、objective 或 negative",
         "按共同评价机制聚合，人物、角色、段子和单项指标通常作为证据侧面；9至16个仅为颗粒度复查范围",
     ],
     "cluster_assignment_review": [
         "逐条核对目标作品、评价方面、当前片段立场和连续逐字证据",
-        "required_any 未穷尽同义表达时，用当前片段中的逐字 anchor_terms 通过初步方面门，后续成员复核仍须独立判断语义",
+        "required_any 未穷尽同义表达时，用当前片段中的逐字 anchor_terms 通过初步方面门，最终摘录复核仍须判断完整语义",
         "cluster_overrides.json 是累计文件；控制器会合并此前已通过记录，当前同ID提交优先",
         "片段有效但归错簇时应移动、缩窄簇名或建立有数据支持的新簇；明确跨剧、无观点、攻击噪声或纯推广可用 cluster=__exclude__ 并给逐字证据",
         "同一来源进入第二簇时，两段原文必须互不重叠且分别形成完整观点",
+    ],
+    "cluster_definition_repair": [
+        "当前大量来源没有任何观点簇能够承接，先从缺口样本归纳遗漏观点或补充同义方面词",
+        "修改 cluster_definitions.json 后重新 advance；不要为几十条缺口逐条写 override",
+        "只增加数据中反复出现或虽少量但具有独立报告价值的观点，不建其他综合或人物姓名簇",
     ],
     "cluster_set_review": [
         "拆开检查簇标题中的每项主张，确保全部成员至少支持其中一项且每项均有成员证据",
         "正面簇只含正面片段、负面簇只含负面片段，客观簇只含事实、均衡观察或舆情分布",
         "同时检查期次范围、来源角色、过度切碎和大口袋簇；禁止为进入9至16个而机械合并或删除样本",
-    ],
-    "cluster_member_review": [
-        "必须由未参与本轮簇命名的第二个AI或清空前轮上下文后的独立轮次完成",
-        "只判断最终簇名、最终立场与当前分配片段是否一致，并提供片段中的连续逐字证据",
-        "只有人物名或题材词重合、没有表达同一判断时必须退回，不能勉强填写 pass",
-    ],
-    "cluster_member_repair": [
-        "逐条读取成员独立复核退回项；先判断应移动来源、缩窄簇标题、拆分真实观点或从展示层排除",
-        "有效观点优先改入能被片段直接支持的现有簇；只有数据确实形成新命题时才新增簇",
-        "修改 cluster_definitions 或累计 cluster_overrides 后重新 advance；不得把独立复核的 fail 直接改写为 pass",
     ],
     "excerpt_review": [
         "最多选择同一来源中按原顺序出现的两个逐字片段，不改写、不补字、不调换顺序",
@@ -298,7 +286,9 @@ def paths_for(manifest: dict) -> dict[str, Path]:
         "reviews": review_dir,
         "templates": workspace / "review_templates",
         "output": Path(manifest["output"]).resolve(),
+        "staged_output": workspace / "run" / "workbench.verified-candidate.html",
         "source_validation": workspace / "run" / "source_review_validation.json",
+        "link_candidates": workspace / "run" / "source_link_candidates.jsonl",
         "override_validation": workspace / "run" / "cluster_override_validation.json",
         "override_ledger": workspace / "run" / "cluster_overrides.ledger.json",
         "override_effective": workspace / "run" / "cluster_overrides.effective.json",
@@ -400,7 +390,8 @@ def list_review_map(payload: dict | None, key_field: str) -> dict[str, dict]:
 
 
 def cluster_override_validation_issues(
-    retained_sources: list[dict], cluster_payload: dict, override_payload: dict
+    retained_sources: list[dict], cluster_payload: dict, override_payload: dict,
+    period_config: dict | None = None,
 ) -> list[dict]:
     """Validate user-correctable override contract errors before clustering.
 
@@ -481,6 +472,23 @@ def cluster_override_validation_issues(
         full_text = own if row.get("post_type") in {"评论", "转帖"} else clean(
             (title + " " + own) if title and normalized(title) not in normalized(own) else own
         )
+        target = (period_config or {}).get("targets", {}).get(batch, {})
+        target_terms = [
+            clean(value)
+            for field in ("strong_terms", "weak_terms")
+            for value in target.get(field, [])
+            if clean(value)
+        ]
+        for prefix in ("", "secondary_"):
+            evidence_key = f"{prefix}target_evidence"
+            target_evidence = clean(review.get(evidence_key))
+            if target_evidence and target_terms and not any(term in target_evidence for term in target_terms):
+                issues.append({
+                    "source_id": source_id,
+                    "issue": f"{prefix}target_evidence_missing_target_anchor",
+                    "required_fix": f"{evidence_key} 必须逐字包含目标作品名或已配置简称；不要复制文章开头的无关段落",
+                    "accepted_target_terms": target_terms,
+                })
         for prefix in ("", "secondary_"):
             fragment_key = f"{prefix}passage_fragments"
             position_key = f"{prefix}passage_positions"
@@ -635,10 +643,6 @@ def cumulative_override_payload(
     }
 
 
-def pair_key(left: object, right: object) -> str:
-    return "\t".join(sorted((clean(left), clean(right))))
-
-
 def source_review_template_payload(workflow_id: str, inputs: list[Path], queue: list[dict]) -> dict:
     reviews = []
     for item in queue:
@@ -646,7 +650,10 @@ def source_review_template_payload(workflow_id: str, inputs: list[Path], queue: 
             "source_id": clean(item.get("id")),
             "decision": "",
             "reason": "",
-            "evidence_candidate_index": None,
+            # Candidate 1 is already a verbatim, source-local passage.  It is a
+            # safe default that ordinary models may replace when another
+            # candidate better supports their semantic decision.
+            "evidence_candidate_index": 1 if item.get("review_evidence_candidates") else None,
         }
         if clean(item.get("episode_review_instruction")):
             review.update({
@@ -661,7 +668,7 @@ def source_review_template_payload(workflow_id: str, inputs: list[Path], queue: 
         "contract": {
             "allowed_decisions": ["retain_core", "retain_consensus", "exclude"],
             "required_for_every_decision": ["source_id", "decision", "reason", "evidence_candidate_index_or_exact_evidence"],
-            "evidence_candidate_index": "choose a candidate_index from the same input item; the script resolves exact text and offsets",
+            "evidence_candidate_index": "candidate 1 is prefilled when available; keep it only if it supports the decision, otherwise choose another candidate_index",
             "exact_evidence_fallback": "use evidence or evidence_position only when no generated candidate supports the decision",
             "exact_copy_group": "review the representative once; select propagates the result to copy_group_source_ids",
         },
@@ -682,87 +689,160 @@ def source_review_is_filled(item: dict) -> bool:
     )
 
 
-def compact_pair_side(row: dict) -> dict:
-    full_text = clean(row.get("body")) or clean(row.get("asr")) or clean(row.get("title"))
+def final_excerpt_review_template_payload(
+    workflow_id: str, inputs: list[Path], review_items: list[dict]
+) -> dict:
+    reviews = {}
+    for item in review_items:
+        view_id = clean(item.get("view_id"))
+        if not view_id:
+            continue
+        reviews[view_id] = {
+            "decision": "",
+            "reason": "",
+            "target_passed": None,
+            "target_evidence": "",
+            "aspect_passed": None,
+            "aspect_evidence": "",
+            "stance": "",
+            "stance_evidence": "",
+            "work_consistency_passed": None,
+            "work_consistency_evidence": "",
+            "self_contained": None,
+            "short_excerpt_justified": False if not item.get("short_excerpt") else None,
+            "short_excerpt_reason": "",
+            "specific_support_passed": False if not item.get("short_excerpt") else None,
+            "specific_support_evidence": "",
+            "independent_opinion_passed": True if not item.get("promotion_markers") else None,
+            "opinion_evidence": "",
+            "failed_checks": [],
+            "reexcerpt_attempted": None,
+            "reassignment_attempted": None,
+            "reassignment_reason": "",
+            "conflict_evidence": "",
+        }
     return {
-        "source_id": clean(row.get("id")),
-        "channel": clean(row.get("channel")),
-        "author": clean(row.get("author")),
-        "title": clean(row.get("title")),
-        "comparison_text": full_text[:1200],
-        "review_evidence": clean(row.get("review_evidence")),
-        "source_text_length": len(full_text),
-    }
-
-
-def dedup_review_worklist(candidates: list[dict], retained_sources: list[dict]) -> list[dict]:
-    sources = {clean(row.get("id")): row for row in retained_sources}
-    worklist = []
-    for item in candidates:
-        left_id, right_id = clean(item.get("left_id")), clean(item.get("right_id"))
-        worklist.append({
-            "left_id": left_id,
-            "right_id": right_id,
-            "batch": clean(item.get("batch")),
-            "jaccard": item.get("jaccard"),
-            "containment": item.get("containment"),
-            "left": compact_pair_side(sources.get(left_id, {})),
-            "right": compact_pair_side(sources.get(right_id, {})),
-            "decision_rule": "same_copy 仅用于转载、洗稿或共享明确稿件骨架；相近观点的独立表达填 independent",
-        })
-    return worklist
-
-
-def dedup_review_template_payload(workflow_id: str, inputs: list[Path], worklist: list[dict]) -> dict:
-    return {
-        "scope": "current_period_copy_reviews",
+        "scope": "current_period_final_excerpt_semantic_reviews",
         "_workflow": binding(workflow_id, inputs),
         "contract": {
-            "allowed_decisions": ["same_copy", "independent"],
-            "required": ["left_id", "right_id", "decision", "reason"],
-            "instruction": "保留预填ID，只填写decision和逐对理由；不要把整份候选列表嵌套进reviews",
+            "schema_version": 2,
+            "instruction": "保留每个 view_id，只填写该项审核结果；不要批量复制同一句理由",
+            "full_source_lookup": "仅对需要重截、转簇或核对跨作品的项目按 source_id 回查 retained_sources.jsonl",
+            "evidence_scopes_are_in_contract": True,
+            "target_evidence": "raw_excerpt, or cleaned_excerpt when raw_excerpt is omitted because both are identical",
+            "work_consistency_evidence": "raw_excerpt, or cleaned_excerpt when raw_excerpt is omitted because both are identical",
+            "aspect_evidence": "cleaned_excerpt",
+            "stance_evidence": "cleaned_excerpt",
+            "specific_support_evidence": "cleaned_excerpt",
         },
-        "reviews": [
-            {
-                "left_id": item["left_id"],
-                "right_id": item["right_id"],
-                "decision": "",
-                "reason": "",
-            }
-            for item in worklist
-        ],
+        "reviews": reviews,
     }
 
 
-def dedup_review_is_filled(item: dict) -> bool:
-    return clean(item.get("decision")) in {"same_copy", "independent"} and bool(clean(item.get("reason")))
+def final_excerpt_review_is_filled(review: dict, input_item: dict | None = None) -> bool:
+    decision = clean(review.get("decision"))
+    if decision not in {"keep", "drop"} or not clean(review.get("reason")):
+        return False
+    if decision == "keep":
+        if clean(review.get("stance")) not in {"positive", "objective", "negative"}:
+            return False
+        required_true = ("target_passed", "aspect_passed", "work_consistency_passed", "self_contained")
+        required_evidence = (
+            "target_evidence", "aspect_evidence", "stance_evidence", "work_consistency_evidence",
+        )
+        if any(review.get(field) is not True for field in required_true):
+            return False
+        if any(not clean(review.get(field)) for field in required_evidence):
+            return False
+        if (input_item or {}).get("short_excerpt"):
+            if review.get("short_excerpt_justified") is not True:
+                return False
+            if review.get("specific_support_passed") is not True:
+                return False
+            if not clean(review.get("short_excerpt_reason")) or not clean(review.get("specific_support_evidence")):
+                return False
+        if (input_item or {}).get("promotion_markers"):
+            if review.get("independent_opinion_passed") is not True or not clean(review.get("opinion_evidence")):
+                return False
+        return True
+    failed_checks = review.get("failed_checks")
+    if not isinstance(failed_checks, list) or not failed_checks or review.get("reexcerpt_attempted") is not True:
+        return False
+    if {clean(value) for value in failed_checks} & {"aspect", "stance"}:
+        return review.get("reassignment_attempted") is True and bool(clean(review.get("reassignment_reason")))
+    if "work_consistency" in {clean(value) for value in failed_checks}:
+        return bool(clean(review.get("conflict_evidence")))
+    return True
 
 
-def dedup_review_validation_issues(payload: dict | None, required_pairs: set[str]) -> list[dict]:
-    issues = []
-    seen: set[str] = set()
-    reviews = (payload or {}).get("reviews", [])
-    if not isinstance(reviews, list):
-        return [{"issue": "reviews_must_be_list", "required_fix": "reviews 必须使用模板中的数组结构"}]
-    for index, item in enumerate(reviews):
-        if not isinstance(item, dict):
-            issues.append({"index": index, "issue": "review_must_be_object"})
+def cluster_set_review_template_payload(
+    workflow_id: str, inputs: list[Path], cluster_input: dict, count_input: dict
+) -> dict:
+    reviews = {}
+    for item in cluster_input.get("clusters", []):
+        review_key = exact_key(item.get("review_key"))
+        if not review_key:
             continue
-        left_id, right_id = clean(item.get("left_id")), clean(item.get("right_id"))
-        pair = pair_key(left_id, right_id)
-        if not left_id or not right_id:
-            issues.append({"index": index, "issue": "missing_pair_ids"})
+        review = {
+            "fingerprint": clean(item.get("fingerprint")),
+            "decision": "",
+            "report_role": "",
+            "scope_type": "",
+            "title_claims_passed": None,
+            "title_claims": [],
+            "stance_purity_passed": None,
+            "scope_purity_passed": None,
+            "scope_reason": "",
+            "granularity_passed": None,
+            "granularity_reason": "",
+            "source_role_checked": None,
+            "source_role_reason": "",
+            "reason": "",
+        }
+        if clean(item.get("stance")) == "objective":
+            review.update({"objective_purity_passed": None, "objective_subtype": ""})
+        reviews[review_key] = review
+    count_reviews = {}
+    for item in count_input.get("batches", []):
+        review_key = exact_key(item.get("review_key"))
+        if not review_key:
             continue
-        if pair in seen:
-            issues.append({"index": index, "pair": pair, "issue": "duplicate_pair"})
-        seen.add(pair)
-        if pair not in required_pairs:
-            issues.append({"index": index, "pair": pair, "issue": "unknown_pair"})
-        if clean(item.get("decision")) not in {"same_copy", "independent"}:
-            issues.append({"index": index, "pair": pair, "issue": "invalid_or_missing_decision"})
-        if not clean(item.get("reason")):
-            issues.append({"index": index, "pair": pair, "issue": "missing_reason"})
-    return issues
+        count_reviews[review_key] = {
+            "fingerprint": clean(item.get("fingerprint")),
+            "decision": "",
+            "cluster_count": item.get("cluster_count"),
+            "range_status": clean(item.get("expected_range_status")),
+            "reader_load_reviewed": None,
+            "overfragmentation_checked": None,
+            "overbreadth_checked": None,
+            "no_forced_merge_or_split": None,
+            "exception_approved": None,
+            "exception_reason": "",
+            "reason": "",
+        }
+    return {
+        "scope": "current_period_cluster_set_reviews",
+        "_workflow": binding(workflow_id, inputs),
+        "contract": {
+            "cluster_review": "按代表样本检查簇标题、立场、范围和颗粒度；每个标题分句至少列一个 supporting_source_id",
+            "per_member_review": "逐样本语义对齐统一在 final_excerpt_review 完成，此处不复制全部成员证据",
+        },
+        "reviews": reviews,
+        "count_reviews": count_reviews,
+    }
+
+
+def cluster_set_review_is_filled(item: dict) -> bool:
+    return (
+        clean(item.get("decision")) == "pass"
+        and bool(clean(item.get("reason")))
+        and isinstance(item.get("title_claims"), list)
+        and bool(item.get("title_claims"))
+    )
+
+
+def cluster_count_review_is_filled(item: dict) -> bool:
+    return clean(item.get("decision")) == "pass" and bool(clean(item.get("reason")))
 
 
 def stage_fresh(manifest: dict, stage: str, token: str, required: Iterable[Path] = ()) -> bool:
@@ -859,6 +939,15 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         write_json(p["workspace"] / STATUS_NAME, payload)
         return payload
 
+    if p["output"].exists():
+        published_hash = manifest.get("stages", {}).get("verify", {}).get("output_hashes", {}).get(str(p["output"].resolve()))
+        if not published_hash or published_hash != sha256(p["output"]):
+            return result(
+                "BLOCKED", "unverified_output",
+                "正式输出路径出现了非本流程 verify PASS 后发布的 HTML；该文件不得交付，请换新输出路径继续",
+                existing_output=str(p["output"]), verified=False,
+            )
+
     if not p["records"].exists():
         return result("BROKEN", "extract", "缺少 extract/records.jsonl，需重新 init")
     if sha256(p["records"]) != manifest.get("records_sha256"):
@@ -876,8 +965,8 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         return result("READY_TO_ADVANCE", "prepare", "配置已就绪，可以执行标准化与初筛", action="prepare", input_digest=prepare_token)
 
     source_queue = read_jsonl(p["run"] / "source_review_queue.jsonl")
+    source_inputs = [p["run"] / "source_review_queue.jsonl", p['run'] / 'normalized_sources.jsonl', p['config']]
     if source_queue or p['source'].exists():
-        source_inputs = [p["run"] / "source_review_queue.jsonl", p['run'] / 'normalized_sources.jsonl', p['config']]
         source_payload = review_payload(p["source"])
         issue = binding_issue(source_payload, workflow_id, source_inputs)
         reviewed = list_review_map(source_payload, "source_id")
@@ -896,35 +985,44 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         ):
             write_json(template, source_template_payload)
         if issue or missing:
+            source_chunks = sorted((p["run"] / "source_review_chunks").glob("chunk-*.jsonl"))
             return result(
-                "REVIEW_REQUIRED", "source_review", "逐条阅读全文并覆盖全部来源语义队列；优先填写候选证据编号，避免手工复制失真",
-                required_file=str(p["source"]), template=str(template), input_file=str(source_inputs[0]),
+                "REVIEW_REQUIRED", "source_review", "按分片覆盖全部来源语义队列；先读逐字候选，候选不足时再按source_id回查全文",
+                required_file=str(p["source"]), template=str(template),
+                input_file=str(source_chunks[0]) if source_chunks else str(source_inputs[0]),
+                input_files=[str(path) for path in source_chunks] or [str(source_inputs[0])],
+                full_input_file=str(source_inputs[0]),
                 binding_issue=issue, required=len(required_ids), completed=len(required_ids & completed_ids), missing=len(missing),
             )
 
-        validation_inputs = source_inputs + [PIPELINE, CONTROLLER]
-        validation_token = digest_paths(validation_inputs)
-        if not stage_fresh(manifest, "source_review_validation", validation_token, [p["source_validation"]]):
-            return result(
-                "READY_TO_ADVANCE", "source_review_validation",
-                "来源复核覆盖齐备，可以一次性校验全部决定、证据位置和综艺期次字段",
-                action="source_review_validation", input_digest=validation_token,
-            )
-        validation = read_json(p["source_validation"])
-        if clean(validation.get("status")) != "PASS":
-            return result(
-                "REVIEW_REQUIRED", "source_review", "来源复核契约未通过；一次修复报告中的全部来源",
-                required_file=str(p["source"]), validation_file=str(p["source_validation"]),
-                issue_count=int(validation.get("issue_count", 0)),
-                affected_source_ids=validation.get("affected_source_ids", []),
-            )
+    validation_inputs = source_inputs + [PIPELINE, CONTROLLER]
+    validation_token = digest_paths(validation_inputs)
+    if not stage_fresh(
+        manifest,
+        "source_review_validation",
+        validation_token,
+        [p["source_validation"], p["link_candidates"]],
+    ):
+        return result(
+            "READY_TO_ADVANCE", "source_review_validation",
+            "来源复核覆盖齐备，可以一次性校验全部决定、证据位置和综艺期次字段",
+            action="source_review_validation", input_digest=validation_token,
+        )
+    validation = read_json(p["source_validation"])
+    if clean(validation.get("status")) != "PASS":
+        return result(
+            "REVIEW_REQUIRED", "source_review", "来源复核契约未通过；一次修复报告中的全部来源",
+            required_file=str(p["source"]), validation_file=str(p["source_validation"]),
+            issue_count=int(validation.get("issue_count", 0)),
+            affected_source_ids=validation.get("affected_source_ids", []),
+        )
 
-    links_token = digest_paths([p["run"] / "normalized_sources.jsonl", LINK_CHECKER, CONTROLLER])
+    links_token = digest_paths([p["link_candidates"], LINK_CHECKER, CONTROLLER])
     link_health = p["run"] / "source_link_health.json"
     if not stage_fresh(manifest, "link_check", links_token, [link_health]):
         return result(
             "READY_TO_ADVANCE", "link_check",
-            "来源语义复核齐备，可以执行链接健康检查；大量链接可能耗时数分钟",
+            "来源语义复核齐备，可以只对仍可能保留的候选来源执行链接健康检查",
             action="link_check", input_digest=links_token,
             progress_file=str(link_health.with_suffix(link_health.suffix + ".progress.json")),
         )
@@ -932,73 +1030,29 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
     selection_inputs = [p["run"] / "normalized_sources.jsonl", p["run"] / "source_decisions.auto.jsonl", link_health, PIPELINE, CONTROLLER]
     if p['source'].exists():
         selection_inputs.append(p["source"])
-    dedup_inputs = [p['run'] / 'normalized_sources.jsonl', p['run'] / 'source_decisions.auto.jsonl', p['config'], link_health]
-    if p['source'].exists():
-        dedup_inputs.append(p['source'])
-    dedup_reviews_current = False
-    if p["dedup"].exists():
-        issue = binding_issue(review_payload(p['dedup']), workflow_id, dedup_inputs)
-        if not issue:
-            selection_inputs.append(p["dedup"])
-            dedup_reviews_current = True
+    # Medium-similarity pairs remain independent by default.  The controller
+    # intentionally does not block on an AI dedup pass; exact/high-confidence
+    # copies are already handled deterministically by select.
     selection_token = digest_paths(selection_inputs)
     if not stage_fresh(manifest, "select", selection_token, [
         p["run"] / "selection_summary.json",
         p["run"] / "retained_sources.jsonl",
         p["run"] / "cluster_discovery_input.jsonl",
+        p["run"] / "cluster_discovery_seed_input.jsonl",
         p["run"] / "dedup_audit.json",
         p["run"] / "source_link_health.applied.json",
     ]):
         return result(
             "READY_TO_ADVANCE", "select", "可以执行来源筛选与同稿去重",
             action="select", input_digest=selection_token,
-            use_dedup_reviews=dedup_reviews_current,
         )
 
     selection_summary = read_json(p["run"] / "selection_summary.json")
     if int(selection_summary.get("unreviewed_source_queue", 0)):
         return result("BLOCKED", "source_review", "select 检出未完成来源复核；请修复 source_reviews.json 后重跑", unresolved=selection_summary["unreviewed_source_queue"])
 
-    dedup_audit = read_json(p["run"] / "dedup_audit.json")
-    candidates = dedup_audit.get("medium_similarity_candidates", [])
-    dedup_payload = review_payload(p["dedup"])
-    dedup_issue = binding_issue(dedup_payload, workflow_id, dedup_inputs) if candidates else ""
-    retained_for_dedup = read_jsonl(p["run"] / "retained_sources.jsonl")
-    dedup_worklist = dedup_review_worklist(candidates, retained_for_dedup)
-    dedup_queue_path = p["run"] / "dedup_review_queue.unresolved.jsonl"
-    required_pairs = {pair_key(item.get("left_id"), item.get("right_id")) for item in candidates}
-    dedup_validation_issues = (
-        dedup_review_validation_issues(dedup_payload, required_pairs)
-        if candidates and dedup_payload is not None and not dedup_issue else []
-    )
-    dedup_reviews = {
-        pair_key(item.get("left_id"), item.get("right_id")): item
-        for item in (dedup_payload or {}).get("reviews", [])
-        if isinstance(item, dict) and dedup_review_is_filled(item)
-    }
-    pending_pairs = sorted(required_pairs - set(dedup_reviews))
-    write_jsonl(dedup_queue_path, [
-        item for item in dedup_worklist
-        if pair_key(item.get("left_id"), item.get("right_id")) in pending_pairs
-    ])
-    if dedup_validation_issues:
-        write_json(p["run"] / "dedup_review_validation.json", {
-            "status": "REVIEW_REQUIRED",
-            "issue_count": len(dedup_validation_issues),
-            "issues": dedup_validation_issues,
-        })
-    if candidates and (dedup_issue or pending_pairs or dedup_validation_issues):
-        template = p["templates"] / "dedup_reviews.template.json"
-        write_json(template, dedup_review_template_payload(workflow_id, dedup_inputs, dedup_worklist))
-        return result(
-            "REVIEW_REQUIRED", "dedup_review", "模板已预填全部相似候选ID；逐对填写decision和reason即可",
-            required_file=str(p["dedup"]), template=str(template), input_file=str(dedup_queue_path),
-            binding_issue=dedup_issue, required=len(required_pairs), completed=len(required_pairs & set(dedup_reviews)), missing=len(pending_pairs),
-            validation_file=str(p["run"] / "dedup_review_validation.json") if dedup_validation_issues else "",
-            validation_issue_count=len(dedup_validation_issues),
-        )
-
-    cluster_discovery_input = p["run"] / "cluster_discovery_input.jsonl"
+    cluster_discovery_input = p["run"] / "cluster_discovery_seed_input.jsonl"
+    cluster_discovery_chunks = sorted((p["run"] / "cluster_discovery_chunks").glob("chunk-*.jsonl"))
     cluster_inputs = [cluster_discovery_input]
     cluster_payload = review_payload(p["clusters"])
     cluster_issue = binding_issue(cluster_payload, workflow_id, cluster_inputs)
@@ -1009,14 +1063,28 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             if batch and batch not in batches:
                 batches.append(batch)
         template = p["templates"] / "cluster_definitions.template.json"
-        ensure_template(template, {
+        cluster_template = {
             "scope": "current_period_data_derived_clusters",
             "_workflow": binding(workflow_id, cluster_inputs),
+            "contract": {
+                "required_fields": ["id", "title", "stance", "summary", "keywords", "required_any", "negative_cues", "background", "rare_signal"],
+                "required_any": "填写1至4个方面词或短语；不得只填作品名、演员名、角色名、武侠、剧情、热度等通用词",
+                "coverage": "观点应共同覆盖本期主要正面、客观、负面表达；后续脚本会把大面积无簇可接的来源退回定义修复",
+            },
             "batches": {batch: [] for batch in batches},
-        })
+        }
+        if (
+            not template.exists()
+            or read_json(template).get("_workflow") != cluster_template.get("_workflow")
+            or not read_json(template).get("contract")
+        ):
+            write_json(template, cluster_template)
         return result(
-            "REVIEW_REQUIRED", "cluster_discovery", "读取紧凑观点片段后归纳一级观点簇；仅在片段语义不清时按source_id回查全文",
-            required_file=str(p["clusters"]), template=str(template), input_file=str(cluster_inputs[0]),
+            "REVIEW_REQUIRED", "cluster_discovery", "依次读取分层抽样的紧凑观点片段后归纳一级观点簇；未入样来源仍会在全量归簇时接受覆盖检查",
+            required_file=str(p["clusters"]), template=str(template),
+            input_file=str(cluster_discovery_chunks[0] if cluster_discovery_chunks else cluster_inputs[0]),
+            input_files=[str(item) for item in cluster_discovery_chunks] or [str(cluster_inputs[0])],
+            full_input_file=str(p["run"] / "cluster_discovery_input.jsonl"),
             full_source_file=str(p["run"] / "retained_sources.jsonl"), binding_issue=cluster_issue,
         )
 
@@ -1035,6 +1103,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             read_jsonl(p["run"] / "retained_sources.jsonl"),
             read_json(p["clusters"]),
             cumulative_overrides,
+            read_json(p["config"]),
         )
         write_json(p["override_validation"], {
             "status": "PASS" if not override_validation_issues else "REVIEW_REQUIRED",
@@ -1068,81 +1137,79 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
 
     low_queue = read_jsonl(p["run"] / "cluster_review_queue.jsonl")
     if low_queue:
+        aspect_gaps = [item for item in low_queue if clean(item.get("issue")) == "passage_aspect_mismatch"]
+        retained_count = len(read_jsonl(p["run"] / "retained_sources.jsonl"))
+        gap_threshold = max(12, int(retained_count * 0.08))
+        if len(aspect_gaps) >= gap_threshold:
+            gap_file = p["run"] / "cluster_definition_gap_samples.jsonl"
+            write_jsonl(gap_file, aspect_gaps[:40])
+            return result(
+                "REVIEW_REQUIRED", "cluster_definition_repair",
+                "大量来源没有可承接的观点簇；先修正观点定义，再处理少量个别归簇",
+                required_file=str(p["clusters"]), input_file=str(gap_file),
+                full_queue_file=str(p["run"] / "cluster_review_queue.jsonl"),
+                uncovered=len(aspect_gaps), retained_sources=retained_count,
+                threshold=gap_threshold, sample_rows=min(len(aspect_gaps), 40),
+                do_not_create_bulk_overrides=True,
+            )
         cumulative_overrides = cumulative_override_payload(
             workflow_id, override_inputs, overrides_payload, p["override_ledger"]
         )
-        overrides = cumulative_overrides.get("overrides", {})
-        override_ids = set(overrides) if isinstance(overrides, dict) else set()
         low_ids = {clean(item.get("source_id")) for item in low_queue}
+        rejected_ids = {
+            clean(item.get("source_id"))
+            for item in low_queue
+            if item.get("override_applied")
+        }
         template = p["templates"] / "cluster_overrides.template.json"
         # Refresh this template on every residual queue.  It is intentionally
         # cumulative so another model cannot erase prior rounds by submitting
         # only the current queue.
         write_json(template, cumulative_overrides)
         return result(
-            "REVIEW_REQUIRED", "cluster_assignment_review", "逐条修正低置信度归簇；对象、方面、立场和逐字证据必须同时对齐",
+            "REVIEW_REQUIRED", "cluster_assignment_review",
+            "当前队列中的项目仍未解决；已提交但仍出现的 override 视为失败，必须按 issue 重新选片段或转簇",
             required_file=str(p["overrides"]), template=str(template), input_file=str(p["run"] / "cluster_review_queue.jsonl"),
-            required=len(low_ids), completed=len(low_ids & override_ids), missing=len(low_ids - override_ids),
+            required=len(low_ids), completed=0, missing=len(low_ids),
+            rejected_submissions=len(rejected_ids), rejected_source_ids=sorted(rejected_ids),
+            do_not_rerun_without_changes=True,
         )
 
     set_inputs = [p["run"] / "cluster_set_review_input.json", p["run"] / "cluster_count_review_input.json"]
+    cluster_set_input = read_json(set_inputs[0])
+    cluster_count_input = read_json(set_inputs[1])
     set_payload = review_payload(p["set"])
     set_issue = binding_issue(set_payload, workflow_id, set_inputs)
-    required_set = {exact_key(item.get("review_key")) for item in read_json(p["run"] / "cluster_set_review_input.json").get("clusters", [])}
-    required_count = {exact_key(item.get("review_key")) for item in read_json(p["run"] / "cluster_count_review_input.json").get("batches", [])}
-    set_done = {exact_key(key) for key in (set_payload or {}).get("reviews", {})} if isinstance((set_payload or {}).get("reviews"), dict) else set()
-    count_done = {exact_key(key) for key in (set_payload or {}).get("count_reviews", {})} if isinstance((set_payload or {}).get("count_reviews"), dict) else set()
+    required_set = {exact_key(item.get("review_key")) for item in cluster_set_input.get("clusters", [])}
+    required_count = {exact_key(item.get("review_key")) for item in cluster_count_input.get("batches", [])}
+    set_values = (set_payload or {}).get("reviews", {})
+    count_values = (set_payload or {}).get("count_reviews", {})
+    set_done = {
+        exact_key(key) for key, item in set_values.items()
+        if isinstance(set_values, dict) and isinstance(item, dict) and cluster_set_review_is_filled(item)
+    } if isinstance(set_values, dict) else set()
+    count_done = {
+        exact_key(key) for key, item in count_values.items()
+        if isinstance(count_values, dict) and isinstance(item, dict) and cluster_count_review_is_filled(item)
+    } if isinstance(count_values, dict) else set()
     if set_issue or required_set - set_done or required_count - count_done:
         template = p["templates"] / "cluster_set_reviews.template.json"
-        ensure_template(template, {
-            "scope": "current_period_cluster_set_reviews",
-            "_workflow": binding(workflow_id, set_inputs),
-            "reviews": {},
-            "count_reviews": {},
-        })
+        set_template = cluster_set_review_template_payload(
+            workflow_id, set_inputs, cluster_set_input, cluster_count_input
+        )
+        if (
+            not template.exists()
+            or read_json(template).get("_workflow") != set_template.get("_workflow")
+            or (required_set and not read_json(template).get("reviews"))
+        ):
+            write_json(template, set_template)
         return result(
             "REVIEW_REQUIRED", "cluster_set_review", "逐簇核对标题主张、成员证据、立场纯度和期次范围，并审查整期簇数",
             required_file=str(p["set"]), template=str(template), input_files=[str(item) for item in set_inputs], binding_issue=set_issue,
             clusters_required=len(required_set), clusters_missing=len(required_set - set_done), batches_required=len(required_count), batches_missing=len(required_count - count_done),
         )
 
-    cluster_set_inputs = cluster_base_inputs + [p["set"]]
-    cluster_set_token = digest_paths(cluster_set_inputs)
-    if not stage_fresh(manifest, "cluster_set", cluster_set_token, [
-        p["run"] / "cluster_member_semantic_review_input.json",
-        p["run"] / "cluster_set_review_queue.unresolved.jsonl",
-        p["run"] / "cluster_count_review_queue.unresolved.jsonl",
-        p["run"] / "cluster_exclusions.jsonl",
-    ]):
-        return result("READY_TO_ADVANCE", "cluster_set", "集合审查齐备，可以生成独立成员级语义复核输入", action="cluster_set", input_digest=cluster_set_token)
-
-    set_unresolved = read_jsonl(p["run"] / "cluster_set_review_queue.unresolved.jsonl")
-    count_unresolved = read_jsonl(p["run"] / "cluster_count_review_queue.unresolved.jsonl")
-    if set_unresolved or count_unresolved:
-        return result(
-            "REVIEW_REQUIRED", "cluster_set_review", "集合审查未通过当前指纹或字段校验；按 unresolved 队列修复",
-            required_file=str(p["set"]), cluster_unresolved=len(set_unresolved), count_unresolved=len(count_unresolved),
-        )
-
-    member_inputs = [p["run"] / "cluster_member_semantic_review_input.json"]
-    member_payload = review_payload(p["members"])
-    member_issue = binding_issue(member_payload, workflow_id, member_inputs)
-    member_required = {exact_key(item.get("review_key")) for item in read_json(member_inputs[0]).get("members", [])}
-    member_done = {exact_key(key) for key in (member_payload or {}).get("reviews", {})} if isinstance((member_payload or {}).get("reviews"), dict) else set()
-    if member_issue or member_required - member_done:
-        template = p["templates"] / "cluster_member_semantic_reviews.template.json"
-        ensure_template(template, {
-            "scope": "current_period_cluster_member_semantic_reviews",
-            "_workflow": binding(workflow_id, member_inputs),
-            "reviews": {},
-        })
-        return result(
-            "REVIEW_REQUIRED", "cluster_member_review", "由未参与簇命名的第二个 AI 或清空上下文后的独立轮次逐成员复核",
-            required_file=str(p["members"]), template=str(template), input_file=str(member_inputs[0]), binding_issue=member_issue,
-            required=len(member_required), completed=len(member_required & member_done), missing=len(member_required - member_done), independent_pass_required=True,
-        )
-
-    cluster_final_inputs = cluster_set_inputs + [p["members"]]
+    cluster_final_inputs = cluster_base_inputs + [p["set"]]
     cluster_final_token = digest_paths(cluster_final_inputs)
     if not stage_fresh(manifest, "cluster_final", cluster_final_token, [
         p["run"] / "cluster_summary.json",
@@ -1150,17 +1217,15 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         p["run"] / "cluster_review_queue.jsonl",
         p["run"] / "cluster_set_review_queue.unresolved.jsonl",
         p["run"] / "cluster_count_review_queue.unresolved.jsonl",
-        p["run"] / "cluster_member_semantic_review_queue.unresolved.jsonl",
         p["run"] / "workbench_order_audit.json",
         p["run"] / "cluster_exclusions.jsonl",
     ]):
-        return result("READY_TO_ADVANCE", "cluster_final", "成员复核齐备，可以固化最终归簇", action="cluster_final", input_digest=cluster_final_token)
+        return result("READY_TO_ADVANCE", "cluster_final", "簇级审查齐备，可以固化最终归簇并进入逐摘录语义复核", action="cluster_final", input_digest=cluster_final_token)
 
     unresolved = {
         "assignment": len(read_jsonl(p["run"] / "cluster_review_queue.jsonl")),
         "cluster_set": len(read_jsonl(p["run"] / "cluster_set_review_queue.unresolved.jsonl")),
         "cluster_count": len(read_jsonl(p["run"] / "cluster_count_review_queue.unresolved.jsonl")),
-        "cluster_members": len(read_jsonl(p["run"] / "cluster_member_semantic_review_queue.unresolved.jsonl")),
     }
     if any(unresolved.values()):
         if unresolved["assignment"]:
@@ -1178,16 +1243,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
                 input_files=[str(p["run"] / "cluster_set_review_queue.unresolved.jsonl"), str(p["run"] / "cluster_count_review_queue.unresolved.jsonl")],
                 unresolved=unresolved,
             )
-        return result(
-            "REVIEW_REQUIRED", "cluster_member_repair",
-            "独立成员复核退回了部分归簇；根据逐条理由修正簇定义或累计归簇后重新推进",
-            required_file=str(p["overrides"]), template=str(override_template),
-            input_file=str(p["run"] / "cluster_member_semantic_review_queue.unresolved.jsonl"),
-            cluster_definitions_file=str(p["clusters"]),
-            member_review_file=str(p["members"]),
-            repair_choices=["move_with_cluster_overrides", "narrow_or_split_cluster_definitions", "evidenced_display_exclusion"],
-            unresolved=unresolved,
-        )
+        raise RuntimeError(f"未知归簇未解决状态：{unresolved}")
 
     render_probe_inputs = [p["run"] / "clustered_items.json", WORKBENCH_TEMPLATE, PIPELINE, CONTROLLER]
     excerpt_template = p['templates'] / 'excerpt_reviews.template.json'
@@ -1199,40 +1255,58 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             return result("REVIEW_REQUIRED", "excerpt_review", "excerpt_reviews.json 与当前最终归簇不一致", required_file=str(p["excerpts"]), template=str(excerpt_template), input_file=str(p['run'] / 'clustered_items.json'), binding_issue=excerpt_issue)
         render_probe_inputs.append(p["excerpts"])
     render_probe_token = digest_paths(render_probe_inputs)
-    if not stage_fresh(manifest, "render_probe", render_probe_token, [p["run"] / "excerpt_semantic_review_input.jsonl"]):
+    if not stage_fresh(manifest, "render_probe", render_probe_token, [
+        p["run"] / "excerpt_semantic_review_input.jsonl",
+        p["run"] / "final_excerpt_review_contract.json",
+    ]):
         return result("READY_TO_ADVANCE", "render_probe", "可以生成候选摘录与最终摘录语义复核输入；这一步不会发布 HTML", action="render_probe", input_digest=render_probe_token)
 
-    semantic_inputs = [p["run"] / "excerpt_semantic_review_input.jsonl"]
+    semantic_inputs = [
+        p["run"] / "excerpt_semantic_review_input.jsonl",
+        p["run"] / "final_excerpt_review_contract.json",
+    ]
     semantic_payload = review_payload(p["semantic"])
     semantic_issue = binding_issue(semantic_payload, workflow_id, semantic_inputs)
-    required_views = {clean(item.get("view_id")) for item in read_jsonl(semantic_inputs[0])}
-    semantic_done = set(list_review_map(semantic_payload, "view_id"))
+    semantic_review_items = read_jsonl(semantic_inputs[0])
+    semantic_input_map = {
+        clean(item.get("view_id")): item
+        for item in semantic_review_items
+        if clean(item.get("view_id"))
+    }
+    required_views = {clean(item.get("view_id")) for item in semantic_review_items}
+    semantic_review_map = list_review_map(semantic_payload, "view_id")
+    semantic_done = {
+        view_id for view_id, item in semantic_review_map.items()
+        if final_excerpt_review_is_filled(item, semantic_input_map.get(view_id))
+    }
     if semantic_issue or required_views - semantic_done:
         template = p["templates"] / "final_excerpt_semantic_reviews.template.json"
-        ensure_template(template, {
-            "scope": "current_period_final_excerpt_semantic_reviews",
-            "_workflow": binding(workflow_id, semantic_inputs),
-            "contract": {
-                "evidence_scopes_are_in_each_input_item": True,
-                "target_evidence": "raw_excerpt",
-                "work_consistency_evidence": "raw_excerpt",
-                "aspect_evidence": "cleaned_excerpt",
-                "stance_evidence": "cleaned_excerpt",
-                "specific_support_evidence": "cleaned_excerpt",
-            },
-            "reviews": {},
-        })
+        semantic_template = final_excerpt_review_template_payload(
+            workflow_id, semantic_inputs, semantic_review_items
+        )
+        if (
+            not template.exists()
+            or read_json(template).get("_workflow") != semantic_template.get("_workflow")
+            or read_json(template).get("contract", {}).get("schema_version") != 2
+            or (required_views and not read_json(template).get("reviews"))
+        ):
+            write_json(template, semantic_template)
         excerpt_template = p["templates"] / "excerpt_reviews.template.json"
         ensure_template(excerpt_template, {
             "scope": "current_period_verbatim_excerpt_reviews",
             "_workflow": binding(workflow_id, [p["run"] / "clustered_items.json"]),
             "reviews": {},
         })
+        semantic_chunks = sorted((p["run"] / "final_excerpt_review_chunks").glob("chunk-*.jsonl"))
         return result(
             "REVIEW_REQUIRED", "final_excerpt_review", "逐条审核最终展示摘录；先重截可修复的片段，再对最终文字做独立语义复核",
             required_file=str(p["semantic"]), template=str(template), optional_excerpt_file=str(p["excerpts"]), optional_excerpt_template=str(excerpt_template),
-            input_file=str(semantic_inputs[0]), binding_issue=semantic_issue,
+            input_file=str(semantic_chunks[0]) if semantic_chunks else str(semantic_inputs[0]),
+            input_files=[str(path) for path in semantic_chunks] or [str(semantic_inputs[0])],
+            full_input_file=str(semantic_inputs[0]), contract_file=str(semantic_inputs[1]),
+            full_source_file=str(p["run"] / "retained_sources.jsonl"), binding_issue=semantic_issue,
             required=len(required_views), completed=len(required_views & semantic_done), missing=len(required_views - semantic_done),
+            incomplete_view_ids=sorted(required_views - semantic_done)[:50],
         )
 
     render_final_inputs = render_probe_inputs + [p["semantic"]]
@@ -1259,23 +1333,16 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
     render_summary_path = p["run"] / "render_summary.json"
     if not stage_fresh(manifest, "render_final", render_final_token, [render_summary_path]):
         previous_render = manifest.get("stages", {}).get("render_final", {})
-        previous_output_sha = clean(previous_render.get("output_sha256"))
-        if p["output"].exists() and not previous_output_sha:
+        if p["output"].exists():
             return result(
                 "BLOCKED", "output_collision",
-                "目标 HTML 在本工作流首次发布前已存在；禁止覆盖，请更换输出路径或人工确认后移走该文件",
+                "正式 HTML 在 verify PASS 前已出现，属于未验证文件；禁止覆盖或交付，请换新输出路径",
                 existing_output=str(p["output"]),
             )
-        if p["output"].exists() and previous_output_sha and sha256(p["output"]) != previous_output_sha:
-            return result(
-                "BLOCKED", "output_modified",
-                "目标 HTML 在本工作流生成后被外部修改；禁止自动覆盖，请另存修改稿或换新输出路径",
-                existing_output=str(p["output"]),
-            )
-        return result("READY_TO_ADVANCE", "render_final", "最终摘录复核齐备，可以生成独立工作台", action="render_final", input_digest=render_final_token)
+        return result("READY_TO_ADVANCE", "render_final", "最终摘录复核齐备，可以生成待验收页面；此时不会发布正式 HTML", action="render_final", input_digest=render_final_token)
 
     render_summary = read_json(render_summary_path)
-    if clean(render_summary.get("status")) != "RENDERED" or not p["output"].exists():
+    if clean(render_summary.get("status")) != "RENDERED" or not p["staged_output"].exists():
         failures = read_json(p["run"] / "render_failures.json").get("failures", []) if (p["run"] / "render_failures.json").exists() else []
         if clean(render_summary.get("stage")) == "post_excerpt_cluster_count_review" and post_count_input.exists():
             template = p["templates"] / "post_excerpt_cluster_count_reviews.template.json"
@@ -1299,22 +1366,25 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             "REVIEW_REQUIRED", "render_repair", "页面未通过最终生成门槛；按失败项重截、重归簇或更新复核后再次 advance",
             render_summary=render_summary, failures_file=str(p["run"] / "render_failures.json"), failure_count=len(failures),
         )
-    saved_output_hash = manifest.get("stages", {}).get("render_final", {}).get("output_hashes", {}).get(str(p["output"].resolve()))
-    if not saved_output_hash or saved_output_hash != sha256(p["output"]):
+    saved_output_hash = manifest.get("stages", {}).get("render_final", {}).get("output_hashes", {}).get(str(p["staged_output"].resolve()))
+    if not saved_output_hash or saved_output_hash != sha256(p["staged_output"]):
         return result(
             "BLOCKED", "output_modified",
-            "目标 HTML 与本轮 render_final 记录不一致；禁止继续验收",
-            existing_output=str(p["output"]),
+            "待验收 HTML 与本轮 render_final 记录不一致；禁止继续验收",
+            existing_output=str(p["staged_output"]),
         )
 
-    verify_inputs = [p["output"], p["run"] / "workbench_dataset.json", p["run"] / "excerpt_provenance.json", PIPELINE, CONTROLLER]
+    verify_inputs = [p["staged_output"], p["run"] / "workbench_dataset.json", p["run"] / "excerpt_provenance.json", PIPELINE, CONTROLLER]
     verify_token = digest_paths(verify_inputs)
-    if not stage_fresh(manifest, "verify", verify_token, [p["run"] / "verification.json"]):
-        return result("READY_TO_ADVANCE", "verify", "工作台已生成，可以执行发布验收", action="verify", input_digest=verify_token)
+    if not stage_fresh(manifest, "verify", verify_token, [p["run"] / "verification.json", p["output"]]):
+        return result("READY_TO_ADVANCE", "verify", "待验收页面已生成；验收通过后才原子发布正式 HTML", action="verify", input_digest=verify_token)
 
     verification = read_json(p["run"] / "verification.json")
     if clean(verification.get("status")) != "PASS":
         return result("BLOCKED", "verify", "发布验收失败，禁止交付", verification=verification)
+    published_hash = manifest.get("stages", {}).get("verify", {}).get("output_hashes", {}).get(str(p["output"].resolve()))
+    if not p["output"].exists() or not published_hash or published_hash != sha256(p["output"]):
+        return result("BLOCKED", "publish", "正式 HTML 缺失或与验收发布记录不一致，禁止交付")
     return result(
         "COMPLETE", "complete", "独立工作台已经通过全部机器门槛；交付前仍需由执行者打开页面做视觉抽查",
         verification=verification, visual_inspection_required=True,
@@ -1385,26 +1455,30 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
             "--run", str(p["run"]), "--reviews", str(p["source"]),
         ]
         result = run_command(command, allow_review_stop=True)
-        outputs = [p["source_validation"]]
+        outputs = [p["source_validation"], p["link_candidates"]]
     elif action == "link_check":
-        command = [sys.executable, str(LINK_CHECKER), "--input", str(p["run"] / "normalized_sources.jsonl"), "--output", str(p["run"] / "source_link_health.json"), "--workers", str(workers), "--timeout", str(timeout)]
+        command = [
+            sys.executable, str(LINK_CHECKER),
+            "--input", str(p["link_candidates"]),
+            "--output", str(p["run"] / "source_link_health.json"),
+            "--workers", str(workers), "--timeout", str(timeout),
+        ]
         result = run_command(command)
         outputs = [p["run"] / "source_link_health.json"]
     elif action == "select":
         command = [sys.executable, str(PIPELINE), "select", "--run", str(p["run"]), "--link-health", str(p["run"] / "source_link_health.json")]
         if p["source"].exists():
             command += ["--reviews", str(p["source"])]
-        if p["dedup"].exists() and bool(state.get("use_dedup_reviews")):
-            command += ["--dedup-reviews", str(p["dedup"])]
         result = run_command(command)
         outputs = [
             p["run"] / "selection_summary.json",
             p["run"] / "retained_sources.jsonl",
             p["run"] / "cluster_discovery_input.jsonl",
+            p["run"] / "cluster_discovery_seed_input.jsonl",
             p["run"] / "dedup_audit.json",
             p["run"] / "source_link_health.applied.json",
         ]
-    elif action in {"cluster_base", "cluster_set", "cluster_final"}:
+    elif action in {"cluster_base", "cluster_final"}:
         command = [sys.executable, str(PIPELINE), "cluster", "--run", str(p["run"]), "--clusters", str(p["clusters"])]
         effective_overrides = None
         override_inputs = [p["run"] / "retained_sources.jsonl", p["clusters"]]
@@ -1415,10 +1489,8 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
             )
             write_json(p["override_effective"], effective_overrides)
             command += ["--overrides", str(p["override_effective"])]
-        if action in {"cluster_set", "cluster_final"}:
-            command += ["--set-reviews", str(p["set"])]
         if action == "cluster_final":
-            command += ["--member-reviews", str(p["members"])]
+            command += ["--set-reviews", str(p["set"])]
         result = run_command(command)
         if effective_overrides is not None:
             # Commit only after the cluster command accepts every merged record.
@@ -1433,13 +1505,6 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
                 p["run"] / "cluster_review_queue.jsonl",
                 p["run"] / "cluster_exclusions.jsonl",
             ]
-        elif action == "cluster_set":
-            outputs = [
-                p["run"] / "cluster_member_semantic_review_input.json",
-                p["run"] / "cluster_set_review_queue.unresolved.jsonl",
-                p["run"] / "cluster_count_review_queue.unresolved.jsonl",
-                p["run"] / "cluster_exclusions.jsonl",
-            ]
         else:
             outputs = [
                 p["run"] / "cluster_summary.json",
@@ -1447,12 +1512,11 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
                 p["run"] / "cluster_review_queue.jsonl",
                 p["run"] / "cluster_set_review_queue.unresolved.jsonl",
                 p["run"] / "cluster_count_review_queue.unresolved.jsonl",
-                p["run"] / "cluster_member_semantic_review_queue.unresolved.jsonl",
                 p["run"] / "workbench_order_audit.json",
                 p["run"] / "cluster_exclusions.jsonl",
             ]
     elif action in {"render_probe", "render_final"}:
-        command = [sys.executable, str(PIPELINE), "render", "--run", str(p["run"]), "--output", str(p["output"])]
+        command = [sys.executable, str(PIPELINE), "render", "--run", str(p["run"]), "--output", str(p["staged_output"])]
         if p["excerpts"].exists():
             command += ["--excerpt-reviews", str(p["excerpts"])]
         if action == "render_final":
@@ -1460,20 +1524,39 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
             if p["post_count"].exists():
                 command += ["--post-count-reviews", str(p["post_count"])]
         result = run_command(command, allow_review_stop=True)
-        if action == "render_final" and p["output"].exists():
-            result["output_sha256"] = sha256(p["output"])
-        outputs = [p["run"] / "excerpt_semantic_review_input.jsonl"]
+        if action == "render_final" and p["staged_output"].exists():
+            result["output_sha256"] = sha256(p["staged_output"])
+        outputs = [
+            p["run"] / "excerpt_semantic_review_input.jsonl",
+            p["run"] / "final_excerpt_review_contract.json",
+        ]
         if action == "render_final":
             outputs = [
                 p["run"] / "render_summary.json",
                 p["run"] / "post_excerpt_cluster_count_review_input.json",
                 p["run"] / "post_excerpt_cluster_count_review_audit.json",
-                p["output"],
+                p["staged_output"],
             ]
     elif action == "verify":
-        command = [sys.executable, str(PIPELINE), "verify", "--run", str(p["run"]), "--output", str(p["output"])]
+        command = [sys.executable, str(PIPELINE), "verify", "--run", str(p["run"]), "--output", str(p["staged_output"])]
         result = run_command(command, allow_review_stop=True)
+        verification = read_json(p["run"] / "verification.json")
+        if clean(verification.get("status")) == "PASS":
+            if p["output"].exists():
+                raise FileExistsError("verify PASS 前正式输出路径已存在，拒绝覆盖外部文件")
+            p["output"].parent.mkdir(parents=True, exist_ok=True)
+            publish_temp = p["output"].with_name(f".{p['output'].name}.{uuid.uuid4().hex}.tmp")
+            shutil.copy2(p["staged_output"], publish_temp)
+            os.replace(publish_temp, p["output"])
+            verification["verified_candidate"] = verification.get("output", str(p["staged_output"]))
+            verification["output"] = str(p["output"])
+            verification["published_after_pass"] = True
+            write_json(p["run"] / "verification.json", verification)
+            result["published_output"] = str(p["output"])
+            result["output_sha256"] = sha256(p["output"])
         outputs = [p["run"] / "verification.json"]
+        if clean(verification.get("status")) == "PASS":
+            outputs.append(p["output"])
     else:
         raise ValueError(f"未知 action：{action}")
     record_stage(workspace, manifest, action, token, result, outputs)

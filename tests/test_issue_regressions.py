@@ -167,26 +167,6 @@ resolved, resolved_position = p.resolve_source_review_evidence(
 )
 assert resolved == "测试剧难看的原因很多。" and resolved_position == [candidate_start, candidate_end]
 
-# The dedup handoff is directly fillable and carries compact side-by-side text.
-dedup_candidates = [{
-    "left_id": "a", "right_id": "b", "batch": "测试",
-    "jaccard": 0.4, "containment": 0.6,
-}]
-dedup_rows = [
-    {**sources["a"], "review_evidence": "测试剧难看的原因很多。"},
-    {**sources["b"], "review_evidence": "测试剧难看的原因很多。"},
-]
-dedup_worklist = w.dedup_review_worklist(dedup_candidates, dedup_rows)
-dedup_template = w.dedup_review_template_payload("wf", [], dedup_worklist)
-assert len(dedup_template["reviews"]) == 1
-assert dedup_worklist[0]["left"]["comparison_text"] and dedup_worklist[0]["right"]["comparison_text"]
-required_pair = {w.pair_key("a", "b")}
-assert {item["issue"] for item in w.dedup_review_validation_issues(dedup_template, required_pair)} == {
-    "invalid_or_missing_decision", "missing_reason",
-}
-dedup_template["reviews"][0].update({"decision": "independent", "reason": "作者和表达独立"})
-assert not w.dedup_review_validation_issues(dedup_template, required_pair)
-
 # Initial clustering receives one compact verbatim passage per retained source,
 # while the full body remains available only by source-id lookup.
 discovery_row = {**sources["a"], "decision": "retain_consensus", "quality": 8.0, "stance": "负向"}
@@ -328,6 +308,70 @@ with tempfile.TemporaryDirectory() as td:
     exclusions = [json.loads(line) for line in (run_dir / "cluster_exclusions.jsonl").read_text(encoding="utf-8").splitlines()]
     assert exclusions[0]["source_id"] == "excluded-at-cluster"
     assert not (run_dir / "cluster_review_queue.jsonl").read_text(encoding="utf-8").strip()
+
+
+# Person names may help locate a source but cannot dominate viewpoint assignment.
+target_config = {
+    "strong_terms": ["《赴山海》", "赴山海"],
+    "weak_terms": [],
+    "auxiliary_terms": ["成毅"],
+    "comparison_terms": [],
+}
+acting_cluster = {
+    "id": "P03", "title": "期待成毅一人分饰三角的演技挑战，认为角色展现表演层次感",
+    "stance": "positive", "keywords": [["成毅", 10], ["演技", 8], ["分饰", 4]],
+    "required_any": [],
+}
+music_cluster = {
+    "id": "P07", "title": "肯定OST阵容与歌曲质量，认为音乐提升观剧沉浸感",
+    "stance": "positive", "keywords": [["OST", 4], ["音乐", 3]],
+    "required_any": [],
+}
+assert p.effective_required_terms(acting_cluster, target_config) == ["演技", "分饰"]
+music_text = "《赴山海》OST阵容很豪华，成毅演唱人物曲，周深演唱片尾曲，音乐很有江湖意境。"
+acting_score, _ = p.cluster_score(music_text, "", acting_cluster, target_config)
+music_score, _ = p.cluster_score(music_text, "", music_cluster, target_config)
+assert music_score > acting_score
+
+# An override target evidence span must itself contain a configured work anchor.
+target_row = {
+    **retained, "id": "target-check", "batch": "测试",
+    "title": "几部新剧集中开播", "body": "先介绍其他作品。随后《赴山海》登场，打戏利落。",
+}
+target_issue_payload = {"overrides": {"target-check": {
+    "cluster": "P01", "reason": "尝试确认目标",
+    "target_evidence": "先介绍其他作品。",
+}}}
+target_issues = w.cluster_override_validation_issues(
+    [target_row], cluster_payload, target_issue_payload,
+    {"targets": {"测试": {"strong_terms": ["《赴山海》", "赴山海"], "weak_terms": []}}},
+)
+assert any(item["issue"] == "target_evidence_missing_target_anchor" for item in target_issues)
+
+# Ordinary-model templates are directly fillable but blank shells do not count as completed reviews.
+set_template = w.cluster_set_review_template_payload(
+    "wf", [],
+    {"clusters": [{"review_key": "测试\tP01", "fingerprint": "abc", "stance": "positive"}]},
+    {"batches": [{"review_key": "测试", "fingerprint": "def", "cluster_count": 1, "expected_range_status": "below_range"}]},
+)
+assert "测试\tP01" in set_template["reviews"]
+assert not w.cluster_set_review_is_filled(set_template["reviews"]["测试\tP01"])
+excerpt_template = w.final_excerpt_review_template_payload(
+    "wf", [], [{"view_id": "source::P01"}]
+)
+assert "source::P01" in excerpt_template["reviews"]
+blank_excerpt_review = excerpt_template["reviews"]["source::P01"]
+assert not w.final_excerpt_review_is_filled(blank_excerpt_review)
+blank_excerpt_review.update({"decision": "keep", "reason": "已查看"})
+assert not w.final_excerpt_review_is_filled(blank_excerpt_review), "只有决定和理由不得跳过必填语义字段"
+blank_excerpt_review.update({
+    "target_passed": True, "target_evidence": "《测试剧》",
+    "aspect_passed": True, "aspect_evidence": "表演自然",
+    "stance": "positive", "stance_evidence": "表演自然",
+    "work_consistency_passed": True, "work_consistency_evidence": "《测试剧》",
+    "self_contained": True,
+})
+assert w.final_excerpt_review_is_filled(blank_excerpt_review)
 
 
 print("PASS: issue-report regressions")

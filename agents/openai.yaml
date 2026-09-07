@@ -1,7 +1,7 @@
 interface:
   display_name: "影视简报样本清洗"
   short_description: "清洗多渠道影视舆情样本，聚类观点并生成可核验离线工作台"
-  default_prompt: "Use $film-brief-cleaning and its mandatory film_workflow.py controller to clean this film brief dataset. Follow workflow_status.json one gate at a time, complete every bound semantic review, and generate a verified offline workbench only after status is COMPLETE. Open the HTML for visual inspection before delivery; if a cumulative workbench is requested, merge only verified standalone pages through film_workflow.py merge."
+  default_prompt: "Use $film-brief-cleaning and only its film_workflow.py controller. Follow workflow_status.json one gate at a time, process every input_files chunk, and never create or deliver HTML yourself. The official workbench exists only after status is COMPLETE and verification is PASS. Open that published HTML for visual inspection; merge cumulative workbenches only through the controller."
 
 policy:
   allow_implicit_invocation: true

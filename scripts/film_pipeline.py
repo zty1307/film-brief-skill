@@ -35,7 +35,6 @@ ALLOWED_CLUSTER_EXCLUSION_REASONS = {
 CLUSTER_ASSIGNMENT_ISSUE_GUIDANCE = {
     "passage_stance_conflict": "当前片段立场与簇不一致；重选原文窗口、移动到同立场簇，或对明确无可用观点项使用有证据的 __exclude__",
     "negative_cluster_missing_negative_cue": "自动词表未确认负向；阅读全文后若确为负向，填写 passage_stance=negative 和逐字证据即可",
-    "small_top_two_margin": "前两簇接近；按完整判断机制选择更精确簇，并用 anchor_terms 锁定支撑句",
     "no_positive_cluster_evidence": "当前窗口没有足够簇证据；重选含判断和具体依据的窗口，或转簇/有证据排除",
     "low_cluster_evidence": "当前窗口与簇标题的语义证据较弱；阅读全文后重选、转簇或有证据排除",
     "multi_work_passage_requires_review": "同段涉及多作品；必须用 target_evidence 明确当前判断属于哪部作品",
@@ -56,6 +55,11 @@ CLUSTER_TITLE_PREDICATE = re.compile(
 GENERIC_CLUSTER_TITLE = re.compile(
     r"其他综合|未分类|待归类|兜底|当前片段(?:中的)?(?:相关事实|直接表达)|未形成完整评价"
 )
+GENERIC_ROUTING_TERMS = {
+    "影视", "电视剧", "电影", "剧集", "综艺", "节目", "作品", "武侠", "古装",
+    "演员", "角色", "人物", "剧情", "内容", "表现", "热度", "关注", "讨论",
+    "认为", "肯定", "认可", "期待", "看好", "质疑", "批评", "担忧", "吐槽",
+}
 BAD_EXCERPT_START = ("…", "...", "。", "，", "；", "：", "”", "’", "）", "】", ")", "]")
 BAD_EXCERPT_END = ("…", "...", "，", "、", "；", "：", "—", "-")
 
@@ -472,6 +476,40 @@ def write_json(path: Path, value: object) -> None:
 def write_jsonl(path: Path, rows: Iterable[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+
+
+def write_jsonl_chunks(
+    directory: Path,
+    rows: list[dict],
+    *,
+    chunk_size: int = 60,
+    max_bytes: int = 120_000,
+) -> list[Path]:
+    """Write bounded AI handoff files while keeping the canonical full JSONL."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for old in directory.glob("chunk-*.jsonl"):
+        old.unlink()
+    paths = []
+    current: list[dict] = []
+    current_bytes = 0
+
+    def flush() -> None:
+        nonlocal current, current_bytes
+        if not current:
+            return
+        path = directory / f"chunk-{len(paths) + 1:03d}.jsonl"
+        write_jsonl(path, current)
+        paths.append(path)
+        current, current_bytes = [], 0
+
+    for row in rows:
+        row_bytes = len((json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
+        if current and (len(current) >= chunk_size or current_bytes + row_bytes > max_bytes):
+            flush()
+        current.append(row)
+        current_bytes += row_bytes
+    flush()
+    return paths
 
 
 def safe_url(value: object) -> str:
@@ -1136,17 +1174,36 @@ def command_prepare(args: argparse.Namespace) -> None:
             len(normalized(source_text(item))),
             item["id"],
         ))
+        # The normalized source remains the authoritative full record.  The AI
+        # handoff contains verbatim evidence candidates and a lookup pointer;
+        # it does not repeat the full body or script-only scoring metadata.
         review_queue.append({
-            **representative,
-            "copy_group_source_ids": sorted(item["id"] for item in group),
+            "id": representative["id"],
+            "batch": representative["batch"],
+            "channel": representative.get("channel", ""),
+            "post_type": representative.get("post_type", ""),
+            "published": representative.get("published", ""),
+            "title": representative.get("title", ""),
+            "author": representative.get("author", ""),
+            "auto_decision": representative.get("auto_decision", ""),
+            "auto_reason": representative.get("auto_reason", ""),
+            "stance": representative.get("stance", ""),
+            "review_evidence_candidates": representative.get("review_evidence_candidates", []),
+            "parent_context": clean(representative.get("parent_body")) if representative.get("post_type") in {"评论", "转帖"} else "",
+            "episode_review_instruction": representative.get("episode_review_instruction", ""),
             "copy_group_size": len(group),
-            "copy_group_basis": "exact_normalized_source_text",
+            "full_source_lookup": {
+                "file": "normalized_sources.jsonl",
+                "source_id": representative["id"],
+                "instruction": "候选片段不足以判断时才按 source_id 回查全文",
+            },
         })
     review_queue.sort(key=lambda item: (item["batch"], item["id"]))
     write_jsonl(run_dir / "normalized_sources.jsonl", sources)
     write_jsonl(run_dir / "out_of_period_sources.jsonl", out_of_period)
     write_jsonl(run_dir / "source_decisions.auto.jsonl", decisions)
     write_jsonl(run_dir / "source_review_queue.jsonl", review_queue)
+    source_review_chunks = write_jsonl_chunks(run_dir / "source_review_chunks", review_queue)
     write_json(run_dir / "period_config.json", config)
     write_json(run_dir / "derived_context_terms.json", derived_context_audit)
     summary = {
@@ -1159,6 +1216,7 @@ def command_prepare(args: argparse.Namespace) -> None:
         "ai_review_queue": len(review_queue),
         "ai_review_queue_before_exact_copy_collapse": len(review_queue_all),
         "exact_copy_review_items_saved": len(review_queue_all) - len(review_queue),
+        "source_review_chunks": len(source_review_chunks),
         "card_files_read": 0,
         "historical_report_fields_read": 0,
         "input_sha256": sha256(records_path),
@@ -1397,6 +1455,38 @@ def command_validate_source_reviews(args: argparse.Namespace) -> None:
     if issues:
         raise SystemExit(1)
 
+    # Link checks are useful only for sources that can still reach the retained
+    # pool. Resolve a reviewed representative across exact-copy families here,
+    # so the network stage skips rows already excluded by content screening.
+    # `select` independently recomputes the decisions and verifies URL coverage.
+    auto = {row["source_id"]: row for row in load_jsonl(run_dir / "source_decisions.auto.jsonl")}
+    decisions = {
+        source_id: clean(auto[source_id].get("auto_decision"))
+        for source_id in sources
+    }
+    for source_id, review in reviews.items():
+        decisions[source_id] = clean(review.get("decision"))
+    for family in copy_components(sources, {}):
+        reviewed = [source_id for source_id in family if source_id in reviews]
+        if reviewed:
+            propagated = decisions[reviewed[0]]
+            for source_id in family:
+                decisions[source_id] = propagated
+    candidates = [
+        {
+            "id": source_id,
+            "batch": row.get("batch", ""),
+            "channel": row.get("channel", ""),
+            "author": row.get("author", ""),
+            "url": row.get("url", ""),
+        }
+        for source_id, row in sources.items()
+        if decisions.get(source_id) in {"retain_core", "retain_consensus"}
+        and clean(row.get("url"))
+        and auto[source_id].get("hard_exclusion") is not True
+    ]
+    write_jsonl(run_dir / "source_link_candidates.jsonl", candidates)
+
 
 def cluster_discovery_record(row: dict, auto_result: dict) -> dict:
     """Build a compact, verbatim-first record for initial viewpoint discovery."""
@@ -1452,12 +1542,8 @@ def cluster_discovery_record(row: dict, auto_result: dict) -> dict:
         "batch": row["batch"],
         "channel": row.get("channel", ""),
         "author": row.get("author", ""),
-        "published": row.get("published", ""),
         "title": row.get("title", ""),
         "source_stance": row.get("stance", ""),
-        "decision": row.get("decision", ""),
-        "quality": row.get("quality", 0),
-        "source_text_length": len(source),
         "discovery_passages": passages,
         "full_text_lookup": {
             "file": "retained_sources.jsonl",
@@ -1465,6 +1551,76 @@ def cluster_discovery_record(row: dict, auto_result: dict) -> dict:
             "instruction": "仅在片段语义不清或需要确认跨作品归属时按 source_id 回查全文",
         },
     }
+
+
+def discovery_round_robin(rows: list[dict], limit: int) -> list[dict]:
+    """Prefer high-quality, cross-channel examples without losing rare stances."""
+    if len(rows) <= limit:
+        return sorted(rows, key=lambda row: row["source_id"])
+    by_channel: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_channel[clean(row.get("channel"))].append(row)
+    for values in by_channel.values():
+        values.sort(key=lambda row: (
+            -int(row.get("_media_rank", 0)),
+            -float(row.get("_quality", 0)),
+            row["source_id"],
+        ))
+    ordered_channels = sorted(
+        by_channel,
+        key=lambda channel: (-CHANNEL_PRIORITY.get(channel, 0), channel),
+    )
+    selected: list[dict] = []
+    while len(selected) < limit and any(by_channel.values()):
+        for channel in ordered_channels:
+            if by_channel[channel] and len(selected) < limit:
+                selected.append(by_channel[channel].pop(0))
+    return selected
+
+
+def discovery_seed(records: list[dict], source_rows: list[dict], limit_per_batch: int = 180) -> list[dict]:
+    """Build a bounded discovery set; assignment later still covers every retained source."""
+    source_by_id = {row["id"]: row for row in source_rows}
+    output: list[dict] = []
+    by_batch: dict[str, list[dict]] = defaultdict(list)
+    for record in records:
+        source = source_by_id[record["source_id"]]
+        by_batch[record["batch"]].append({
+            **record,
+            "_quality": source.get("quality", 0),
+            "_media_rank": source.get("media_authority_rank", 0),
+        })
+    for batch in sorted(by_batch):
+        batch_rows = by_batch[batch]
+        if len(batch_rows) <= limit_per_batch:
+            chosen = batch_rows
+        else:
+            stance_groups: dict[str, list[dict]] = defaultdict(list)
+            for row in batch_rows:
+                stance_groups[clean(row.get("source_stance")) or "混合或中性"].append(row)
+            quotas = {stance: min(len(values), 20) for stance, values in stance_groups.items()}
+            remaining = limit_per_batch - sum(quotas.values())
+            while remaining > 0:
+                candidates = [
+                    stance for stance, values in stance_groups.items()
+                    if quotas[stance] < len(values)
+                ]
+                if not candidates:
+                    break
+                stance = max(
+                    candidates,
+                    key=lambda value: ((len(stance_groups[value]) ** 0.5) / (quotas[value] + 1), value),
+                )
+                quotas[stance] += 1
+                remaining -= 1
+            chosen = []
+            for stance in sorted(stance_groups):
+                chosen.extend(discovery_round_robin(stance_groups[stance], quotas[stance]))
+        for row in chosen:
+            row.pop("_quality", None)
+            row.pop("_media_rank", None)
+        output.extend(chosen)
+    return sorted(output, key=lambda row: (row["batch"], row["source_id"]))
 
 
 def load_link_health(path: Path) -> dict[str, dict]:
@@ -1505,10 +1661,6 @@ def command_select(args: argparse.Namespace) -> None:
             f"{run_dir / 'source_review_validation.json'}"
         )
     link_health = load_link_health(args.link_health)
-    expected_urls = {clean(row.get("url")) for row in sources.values() if clean(row.get("url"))}
-    missing_link_checks = sorted(expected_urls - set(link_health))
-    if missing_link_checks:
-        raise ValueError(f"link_health 未覆盖 {len(missing_link_checks)} 个来源 URL，例如：{missing_link_checks[:3]}")
     queue_by_id = {clean(row.get("id")): row for row in review_queue}
     pending_reviews = [row for row in review_queue if row["id"] not in reviews]
     write_jsonl(run_dir / "source_review_queue.unresolved.jsonl", pending_reviews)
@@ -1575,6 +1727,20 @@ def command_select(args: argparse.Namespace) -> None:
             propagated = source["decision"]
         family_audit.append({"members": family, "propagated_decision": propagated})
 
+    expected_urls = {
+        clean(row.get("url"))
+        for row in decided
+        if row["decision"] in {"retain_core", "retain_consensus"}
+        and clean(row.get("url"))
+        and auto[row["id"]].get("hard_exclusion") is not True
+    }
+    missing_link_checks = sorted(expected_urls - set(link_health))
+    if missing_link_checks:
+        raise ValueError(
+            f"link_health 未覆盖 {len(missing_link_checks)} 个仍可能保留的来源 URL，例如："
+            f"{missing_link_checks[:3]}"
+        )
+
     hard_exclusions = []
     for row in decided:
         base = auto[row["id"]]
@@ -1624,10 +1790,11 @@ def command_select(args: argparse.Namespace) -> None:
 
     kept.sort(key=lambda row: (row["batch"], -int(row.get("media_authority_rank", 0)), -CHANNEL_PRIORITY.get(row["channel"], 0), -float(row["quality"]), row["id"]))
     write_jsonl(run_dir / "retained_sources.jsonl", kept)
-    write_jsonl(
-        run_dir / "cluster_discovery_input.jsonl",
-        [cluster_discovery_record(row, auto[row["id"]]) for row in kept],
-    )
+    discovery_records = [cluster_discovery_record(row, auto[row["id"]]) for row in kept]
+    write_jsonl(run_dir / "cluster_discovery_input.jsonl", discovery_records)
+    discovery_seed_records = discovery_seed(discovery_records, kept)
+    write_jsonl(run_dir / "cluster_discovery_seed_input.jsonl", discovery_seed_records)
+    discovery_chunks = write_jsonl_chunks(run_dir / "cluster_discovery_chunks", discovery_seed_records)
     write_json(run_dir / "source_decisions.final.json", {"decisions": [{"source_id": row["id"], "decision": row["decision"], "reason": row["decision_reason"], "basis": row["decision_basis"], "evidence": row.get("review_evidence", ""), "evidence_position": row.get("review_evidence_position")} for row in decided]})
     write_json(run_dir / "dedup_audit.json", {"copy_families": family_audit, "duplicates": duplicates, "medium_similarity_candidates": candidates})
     write_json(run_dir / "hard_exclusion_audit.json", {"exclusions": hard_exclusions})
@@ -1638,6 +1805,8 @@ def command_select(args: argparse.Namespace) -> None:
         "admitted_before_dedup": len(admitted),
         "hard_or_reviewed_duplicates": len(duplicates),
         "retained_after_dedup": len(kept),
+        "cluster_discovery_seed": len(discovery_seed_records),
+        "cluster_discovery_chunks": len(discovery_chunks),
         "medium_similarity_candidates_kept_pending_review": sum(item["review"] == "pending_independent_by_default" for item in candidates),
         "source_review_queue": len(review_queue),
         "unreviewed_source_queue": len(pending_reviews),
@@ -1687,7 +1856,25 @@ def keyword_pairs(definition: dict) -> list[tuple[str, float]]:
     return [(term, weight) for term, weight in result if term]
 
 
-def validate_clusters(payload: dict, batches: set[str]) -> dict[str, list[dict]]:
+def effective_required_terms(definition: dict, target_config: dict | None = None) -> list[str]:
+    """Return aspect-bearing routing terms without letting work or person names become the gate."""
+    explicit = [clean(term) for term in definition.get("required_any", []) if clean(term)]
+    strong, weak, auxiliary, comparisons = target_layers(target_config or {})
+    entities = {normalized(term) for term in strong + weak + auxiliary + comparisons}
+    candidates = []
+    weighted = (
+        [(term, 1.0) for term in explicit]
+        if explicit else sorted(keyword_pairs(definition), key=lambda item: item[1], reverse=True)
+    )
+    for term, weight in weighted:
+        key = normalized(term)
+        if len(key) < 2 or key in entities or term in GENERIC_ROUTING_TERMS:
+            continue
+        candidates.append(term)
+    return list(dict.fromkeys(candidates))[:4]
+
+
+def validate_clusters(payload: dict, batches: set[str], config: dict | None = None) -> dict[str, list[dict]]:
     if payload.get("scope") not in {None, "current_period_data_derived_clusters"}:
         raise ValueError("cluster_definitions scope 错误")
     definitions = payload.get("batches")
@@ -1711,24 +1898,56 @@ def validate_clusters(payload: dict, batches: set[str]) -> dict[str, list[dict]]
                 raise ValueError(f"{batch}/{item.get('id')} 缺少合法 stance")
             if not keyword_pairs(item) and not item.get("background"):
                 raise ValueError(f"{batch}/{item.get('id')} 缺少关键词")
+            target_config = (config or {}).get("targets", {}).get(batch, {})
+            if not item.get("background") and not effective_required_terms(item, target_config):
+                raise ValueError(
+                    f"{batch}/{item.get('id')} 缺少可用于归簇的方面词；"
+                    "关键词不能只由作品名、演员名或影视通用词构成"
+                )
     return definitions
 
 
-def cluster_score(fragment: str, title: str, definition: dict) -> tuple[float, list[str]]:
+def cluster_score(
+    fragment: str,
+    title: str,
+    definition: dict,
+    target_config: dict | None = None,
+) -> tuple[float, list[str]]:
     score, hits = 0.0, []
+    strong, weak, auxiliary, comparisons = target_layers(target_config or {})
+    target_keys = {normalized(term) for term in strong + weak}
+    auxiliary_keys = {normalized(term) for term in auxiliary}
+    comparison_keys = {normalized(term) for term in comparisons}
     for term, weight in keyword_pairs(definition):
         body_count = min(fragment.count(term), 3)
         title_count = min(title.count(term), 2)
         if body_count or title_count:
             hits.append(term)
-            score += body_count * weight * 2.2 + title_count * weight * 0.6
+            term_key = normalized(term)
+            if term_key in target_keys:
+                effective_weight = 0.0
+            elif term_key in auxiliary_keys:
+                effective_weight = min(float(weight), 0.5)
+            elif term_key in comparison_keys or term in GENERIC_ROUTING_TERMS:
+                effective_weight = min(float(weight), 1.0)
+            else:
+                effective_weight = min(max(float(weight), 0.5), 5.0)
+            score += body_count * effective_weight * 2.2 + title_count * effective_weight * 0.6
     score += min(5.0, len(OPINION.findall(fragment)) * 0.7)
-    required = [clean(term) for term in definition.get("required_any", []) if clean(term)]
+    required = effective_required_terms(definition, target_config)
     if required and not any(term in fragment for term in required):
-        score -= 12.0
+        score -= 30.0
     negative = [clean(term) for term in definition.get("negative_cues", []) if clean(term)]
     if negative and not any(term in fragment for term in negative):
         score -= 20.0
+    local_stance = stance(fragment)
+    expected_stance = clean(definition.get("stance"))
+    if expected_stance == "positive" and local_stance == "负向":
+        score -= 30.0
+    elif expected_stance == "negative" and local_stance == "正向":
+        score -= 30.0
+    elif expected_stance == "objective" and local_stance != "混合或中性" and not definition.get("objective_meta"):
+        score -= 12.0
     return score, hits
 
 
@@ -1744,7 +1963,7 @@ def best_window(row: dict, definition: dict, anchor_terms: list[str] | None = No
     for start in range(len(spans)):
         for end in range(start, min(len(spans), start + 2)):
             fragment = body[spans[start]["start"]:spans[end]["end"]]
-            score, hits = cluster_score(fragment, row.get("title", ""), definition)
+            score, hits = cluster_score(fragment, row.get("title", ""), definition, target_config)
             strong_hits = term_hits(fragment, strong_terms)
             weak_hits = term_hits(fragment, weak_terms)
             comparison_hits = term_hits(fragment, comparisons)
@@ -1766,16 +1985,52 @@ def best_window(row: dict, definition: dict, anchor_terms: list[str] | None = No
             if normalized_anchors:
                 score += 44.0 + 16.0 * len(anchor_hits) if anchor_hits else -24.0
             candidates.append({"start": spans[start]["start"], "end": spans[end]["end"], "text": fragment, "score": round(score, 3), "hits": hits, "anchor_hits": anchor_hits, "strong_target_hits": strong_hits, "weak_target_hits": weak_hits, "comparison_hits": comparison_hits})
+    required = effective_required_terms(definition, target_config)
     return max(
         candidates,
         key=lambda item: (
             bool(item.get("anchor_hits")) if normalized_anchors else True,
             len(item.get("anchor_hits", [])),
+            bool(item.get("strong_target_hits")) and (
+                not required or any(term in item.get("text", "") for term in required)
+            ),
+            bool(item.get("strong_target_hits")),
             item["score"],
             len(item["hits"]),
             -item["start"],
         ),
     ) if candidates else {"start": 0, "end": len(body), "text": body, "score": 0.0, "hits": []}
+
+
+def target_evidence_candidates(row: dict, target_config: dict, limit: int = 3) -> list[dict]:
+    """Return short verbatim source spans that explicitly contain the target work."""
+    body = source_text(row)
+    strong, weak, _, _ = target_layers(target_config)
+    terms = strong + weak
+    candidates = []
+    for span in sentence_spans(body):
+        hits = term_hits(span["text"], terms)
+        if not hits:
+            continue
+        text = span["text"]
+        if len(text) > 260:
+            first = min(text.find(term) for term in hits if term in text)
+            left = max(0, first - 90)
+            right = min(len(text), first + 170)
+            text = text[left:right]
+            start, end = span["start"] + left, span["start"] + right
+        else:
+            start, end = span["start"], span["end"]
+        candidates.append({
+            "candidate_index": len(candidates) + 1,
+            "text": text,
+            "start": start,
+            "end": end,
+            "target_hits": hits,
+        })
+        if len(candidates) >= limit:
+            break
+    return candidates
 
 
 def reviewed_window(
@@ -1812,7 +2067,7 @@ def reviewed_window(
     else:
         raise ValueError(f"{position_key} 必须为位置数组；也可省略并由脚本按原文顺序定位")
     text = clean(" ".join(fragment.strip() for fragment in fragments))
-    score, hits = cluster_score(text, row.get("title", ""), definition)
+    score, hits = cluster_score(text, row.get("title", ""), definition, target_config)
     strong_terms, weak_terms, _, comparisons = target_layers(target_config)
     strong_hits = term_hits(text, strong_terms)
     weak_hits = term_hits(text, weak_terms)
@@ -1905,11 +2160,11 @@ def passage_alignment(
         target_passed = bool(title_hits and not source_comparisons)
         target_basis = "single_work_title_anchor" if target_passed else "no_passage_target_anchor"
 
-    required = [clean(term) for term in definition.get("required_any", []) if clean(term)]
+    required = effective_required_terms(definition, target_config)
     aspect_hits = [term for term in required if term in text]
     # required_any is a routing vocabulary, not an exhaustive semantic list.
     # A reviewed verbatim anchor may express the same aspect in different words;
-    # the later independent member review remains the semantic release gate.
+    # the final excerpt review remains the item-level semantic release gate.
     reviewed_anchor_hits = [clean(term) for term in window.get("anchor_hits", []) if clean(term)]
     aspect_passed = not required or bool(aspect_hits) or bool(override and reviewed_anchor_hits)
     aspect_basis = (
@@ -2101,74 +2356,6 @@ def cluster_count_review_fingerprint(batch: str, definitions: list[dict], groupe
     return hashlib.sha256(encoded).hexdigest()
 
 
-def cluster_member_review_fingerprint(batch: str, definition: dict, member: dict) -> str:
-    payload = {
-        "batch": batch,
-        "cluster_id": str(definition["id"]),
-        "title": clean(definition.get("title")),
-        "stance": clean(definition.get("stance")),
-        "source_id": member["source_id"],
-        "passage": clean(member.get("window", {}).get("text")),
-        "passage_positions": member.get("window", {}).get("positions", []),
-    }
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def cluster_member_review_map(path: Path | None) -> dict[str, dict]:
-    if path is None or not path.exists():
-        return {}
-    payload = load_json(path)
-    if payload.get("scope") != "current_period_cluster_member_semantic_reviews":
-        raise ValueError("cluster_member_reviews scope 错误")
-    reviews = payload.get("reviews")
-    if not isinstance(reviews, dict):
-        raise ValueError("cluster_member_reviews 缺少 reviews 对象")
-    return {str(key).strip(): value for key, value in reviews.items() if isinstance(value, dict)}
-
-
-def validate_cluster_member_review(
-    batch: str,
-    definition: dict,
-    member: dict,
-    review: dict | None,
-    title_claim_count: int,
-) -> list[str]:
-    source_id = member["source_id"]
-    fingerprint = cluster_member_review_fingerprint(batch, definition, member)
-    passage = clean(member.get("window", {}).get("text"))
-    review = review or {}
-    issues = []
-    if clean(review.get("fingerprint")) != fingerprint:
-        issues.append("review_fingerprint_missing_or_stale")
-    if clean(review.get("decision")) != "pass":
-        issues.append("review_decision_not_pass")
-    for field in (
-        "target_passed",
-        "title_support_passed",
-        "stance_passed",
-        "scope_checked",
-        "source_role_checked",
-    ):
-        if review.get(field) is not True:
-            issues.append(f"{field}_not_true")
-    evidence = clean(review.get("evidence"))
-    if len(normalized(evidence)) < 4:
-        issues.append("evidence_too_short")
-    elif evidence not in passage:
-        issues.append("evidence_not_in_assigned_passage")
-    claim_indices = review.get("supported_claim_indices")
-    if (
-        not isinstance(claim_indices, list)
-        or not claim_indices
-        or any(not isinstance(index, int) or index < 0 or index >= title_claim_count for index in claim_indices)
-    ):
-        issues.append("supported_claim_indices_invalid")
-    if not clean(review.get("reason")):
-        issues.append("reason_missing")
-    return issues
-
-
 def validate_cluster_set_review(
     batch: str,
     definition: dict,
@@ -2179,10 +2366,6 @@ def validate_cluster_set_review(
     cluster_id = str(definition["id"])
     fingerprint = cluster_set_review_fingerprint(batch, definition, members)
     member_ids = {item["source_id"] for item in members}
-    member_passages = {
-        item["source_id"]: clean(item.get("window", {}).get("text"))
-        for item in members
-    }
     issues = []
     review = review or {}
     if clean(review.get("fingerprint")) != fingerprint:
@@ -2218,7 +2401,6 @@ def validate_cluster_set_review(
     ):
         issues.append("legacy_hierarchy_fields_not_allowed")
     claims = review.get("title_claims")
-    title_claim_support: set[str] = set()
     if not isinstance(claims, list) or not claims:
         issues.append("title_claims_missing")
     else:
@@ -2231,41 +2413,6 @@ def validate_cluster_set_review(
                 issues.append(f"title_claim_{index}_support_missing")
             elif any(clean(source_id) not in member_ids for source_id in support):
                 issues.append(f"title_claim_{index}_support_outside_cluster")
-            else:
-                title_claim_support.update(clean(source_id) for source_id in support)
-    if title_claim_support != member_ids:
-        issues.append("title_claim_support_does_not_cover_all_members")
-
-    member_support = review.get("member_support")
-    if not isinstance(member_support, dict):
-        issues.append("member_support_missing")
-    else:
-        support_ids = {clean(source_id) for source_id in member_support}
-        if support_ids != member_ids:
-            issues.append("member_support_does_not_cover_all_members")
-        claim_count = len(claims) if isinstance(claims, list) else 0
-        for source_id in sorted(member_ids):
-            item = member_support.get(source_id)
-            if not isinstance(item, dict):
-                issues.append(f"member_support_{source_id}_invalid")
-                continue
-            evidence = clean(item.get("evidence"))
-            if len(normalized(evidence)) < 4:
-                issues.append(f"member_support_{source_id}_evidence_too_short")
-            elif evidence not in member_passages.get(source_id, ""):
-                issues.append(f"member_support_{source_id}_evidence_not_in_passage")
-            claim_indices = item.get("claim_indices")
-            if (
-                not isinstance(claim_indices, list)
-                or not claim_indices
-                or any(not isinstance(index, int) or index < 0 or index >= claim_count for index in claim_indices)
-            ):
-                issues.append(f"member_support_{source_id}_claim_indices_invalid")
-            elif isinstance(claims, list):
-                for index in claim_indices:
-                    claim_support = claims[index].get("supporting_source_ids", []) if isinstance(claims[index], dict) else []
-                    if source_id not in {clean(value) for value in claim_support}:
-                        issues.append(f"member_support_{source_id}_claim_link_missing")
 
     objective_subtype = clean(review.get("objective_subtype"))
     if clean(definition.get("stance")) == "objective":
@@ -2347,11 +2494,14 @@ def command_cluster(args: argparse.Namespace) -> None:
     run_dir = args.run.resolve()
     sources = load_jsonl(run_dir / "retained_sources.jsonl")
     config = load_json(run_dir / "period_config.json")
-    definitions = validate_clusters(load_json(args.clusters.resolve()), {row["batch"] for row in sources})
+    definitions = validate_clusters(
+        load_json(args.clusters.resolve()),
+        {row["batch"] for row in sources},
+        config,
+    )
     overrides = flatten_overrides(args.overrides)
     set_reviews = cluster_set_review_map(args.set_reviews)
     count_reviews = cluster_count_review_map(args.set_reviews)
-    member_reviews = cluster_member_review_map(args.member_reviews)
     by_id = {batch: {str(item["id"]): item for item in values} for batch, values in definitions.items()}
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     low_confidence = []
@@ -2416,8 +2566,10 @@ def command_cluster(args: argparse.Namespace) -> None:
             issue = "negative_cluster_missing_negative_cue"
         elif not issue and not override and primary_window["score"] < 5:
             issue = "low_cluster_evidence"
-        elif not issue and not override and margin < 1.5:
-            issue = "small_top_two_margin"
+        # A small margin means two nearby viewpoints are both plausible.  The
+        # deterministic winner is safe to keep and the representative
+        # cluster-set review can still refine an over-broad definition.  Do
+        # not turn this ordinary ambiguity into hundreds of item-level tasks.
         assignment = {
             "source_id": row["id"], "batch": row["batch"], "cluster_id": primary_id,
             "window": primary_window, "score": primary_window["score"], "margin": round(margin, 3),
@@ -2430,12 +2582,25 @@ def command_cluster(args: argparse.Namespace) -> None:
         grouped[(row["batch"], primary_id)].append(assignment)
         assignment_audit.append({key: assignment[key] for key in ("source_id", "batch", "cluster_id", "score", "margin", "basis", "alignment")})
         if issue:
+            top_candidates = [
+                {
+                    "cluster": str(definition["id"]),
+                    "title": definition["title"],
+                    "score": score,
+                    "passage": clean(candidate_window.get("text")),
+                    "required_terms": effective_required_terms(definition, target_config),
+                    "target_hits": candidate_window.get("strong_target_hits", []) + candidate_window.get("weak_target_hits", []),
+                }
+                for score, definition, candidate_window in scores[:3]
+            ]
             low_confidence.append({
                 "source_id": row["id"], "batch": row["batch"], "provisional_cluster": primary_id,
                 "issue": issue, "issue_guidance": CLUSTER_ASSIGNMENT_ISSUE_GUIDANCE.get(issue, "阅读全文后修正归簇并提供逐字证据"),
                 "current_passage": clean(primary_window.get("text")), "current_alignment": primary_alignment,
-                "override_applied": bool(override), "title": row["title"], "body": source_text(row),
-                "top_scores": [{"cluster": str(definition["id"]), "title": definition["title"], "score": score} for score, definition, _ in scores[:3]],
+                "override_applied": bool(override), "title": row["title"],
+                "target_evidence_candidates": target_evidence_candidates(row, target_config),
+                "top_cluster_candidates": top_candidates,
+                "full_source_lookup": {"file": "retained_sources.jsonl", "source_id": row["id"]},
             })
         secondary_id = clean(override.get("secondary_cluster"))
         if secondary_id:
@@ -2467,13 +2632,13 @@ def command_cluster(args: argparse.Namespace) -> None:
                     "source_id": row["id"], "batch": row["batch"], "provisional_cluster": secondary_id,
                     "issue": secondary_issue, "issue_guidance": CLUSTER_ASSIGNMENT_ISSUE_GUIDANCE.get(secondary_issue, "阅读全文后修正第二归簇并提供逐字证据"),
                     "current_passage": clean(secondary_window.get("text")), "current_alignment": secondary_alignment,
-                    "override_applied": True, "title": row["title"], "body": source_text(row),
+                    "override_applied": True, "title": row["title"],
+                    "target_evidence_candidates": target_evidence_candidates(row, target_config),
+                    "full_source_lookup": {"file": "retained_sources.jsonl", "source_id": row["id"]},
                 })
 
     set_review_input = []
     set_review_queue = []
-    member_review_input = []
-    member_review_queue = []
     for batch, batch_defs in definitions.items():
         for definition in batch_defs:
             members = grouped.get((batch, str(definition["id"])), [])
@@ -2484,6 +2649,7 @@ def command_cluster(args: argparse.Namespace) -> None:
             fingerprint = cluster_set_review_fingerprint(batch, definition, members)
             author_counts = Counter(clean(item["source"].get("author")) or "未知作者" for item in members)
             scope_counts = Counter(clean(item["source"].get("episode_scope")) or "未标注" for item in members)
+            representative_members = order_for_workbench(members)[:8]
             input_item = {
                 "review_key": review_key,
                 "fingerprint": fingerprint,
@@ -2493,6 +2659,7 @@ def command_cluster(args: argparse.Namespace) -> None:
                 "stance": definition["stance"],
                 "content_mode": clean(config["targets"][batch].get("content_mode")) or "serial_drama",
                 "independent_sources": size,
+                "representative_sample_count": len(representative_members),
                 "unique_authors": len(author_counts),
                 "largest_author_share": round(max(author_counts.values()) / size, 4) if size else 0,
                 "episode_scope_counts": dict(scope_counts),
@@ -2507,8 +2674,9 @@ def command_cluster(args: argparse.Namespace) -> None:
                         "passage_fragments": item["window"].get("fragments", []),
                         "passage_positions": item["window"].get("positions", []),
                     }
-                    for item in members
+                    for item in representative_members
                 ],
+                "instruction": "只做簇级标题、立场、范围和颗粒度检查；每条标题主张给出至少一个代表样本ID。逐样本对齐由最终摘录语义复核统一完成。",
             }
             set_review_input.append(input_item)
             issues, enriched = validate_cluster_set_review(
@@ -2530,39 +2698,6 @@ def command_cluster(args: argparse.Namespace) -> None:
                 if definition["rare_signal"]:
                     definition["rare_signal_reason"] = enriched["review_reason"]
 
-            set_review = set_reviews.get(review_key, {})
-            title_claims = set_review.get("title_claims") if isinstance(set_review, dict) else []
-            title_claim_count = len(title_claims) if isinstance(title_claims, list) else 0
-            for member in members:
-                source_id = member["source_id"]
-                member_key = f"{batch}\t{definition['id']}\t{source_id}"
-                member_input = {
-                    "review_key": member_key,
-                    "fingerprint": cluster_member_review_fingerprint(batch, definition, member),
-                    "batch": batch,
-                    "cluster_id": str(definition["id"]),
-                    "title": definition["title"],
-                    "stance": definition["stance"],
-                    "title_claims": title_claims,
-                    "source_id": source_id,
-                    "channel": member["source"].get("channel", ""),
-                    "author": member["source"].get("author", ""),
-                    "published": member["source"].get("published", ""),
-                    "episode_scope": member["source"].get("episode_scope", ""),
-                    "passage": clean(member.get("window", {}).get("text")),
-                    "passage_fragments": member.get("window", {}).get("fragments", []),
-                    "passage_positions": member.get("window", {}).get("positions", []),
-                }
-                member_review_input.append(member_input)
-                member_issues = validate_cluster_member_review(
-                    batch,
-                    definition,
-                    member,
-                    member_reviews.get(member_key),
-                    title_claim_count,
-                )
-                if member_issues:
-                    member_review_queue.append({**member_input, "issues": member_issues})
 
     count_review_input = []
     count_review_queue = []
@@ -2657,9 +2792,7 @@ def command_cluster(args: argparse.Namespace) -> None:
     write_json(run_dir / "cluster_count_review_input.json", {"scope": "current_period_cluster_count_review_input", "batches": count_review_input})
     write_jsonl(run_dir / "cluster_count_review_queue.unresolved.jsonl", count_review_queue)
     write_json(run_dir / "cluster_count_review_audit.json", count_review_audit)
-    write_json(run_dir / "cluster_member_semantic_review_input.json", {"scope": "current_period_cluster_member_semantic_review_input", "members": member_review_input})
-    write_jsonl(run_dir / "cluster_member_semantic_review_queue.unresolved.jsonl", member_review_queue)
-    summary = {"status": "CLUSTERED", "retained_sources": len(sources), "assignments": len(assignment_audit), "display_exclusions": len(cluster_exclusions), "workbench_items": len(selected), "unique_workbench_sources": len({item["source_id"] for item in selected}), "low_confidence_unresolved": len(low_confidence), "cluster_set_review_unresolved": len(set_review_queue), "cluster_count_review_unresolved": len(count_review_queue), "cluster_member_semantic_review_unresolved": len(member_review_queue), "batches": dict(Counter(item["batch"] for item in selected))}
+    summary = {"status": "CLUSTERED", "retained_sources": len(sources), "assignments": len(assignment_audit), "display_exclusions": len(cluster_exclusions), "workbench_items": len(selected), "unique_workbench_sources": len({item["source_id"] for item in selected}), "low_confidence_unresolved": len(low_confidence), "cluster_set_review_unresolved": len(set_review_queue), "cluster_count_review_unresolved": len(count_review_queue), "batches": dict(Counter(item["batch"] for item in selected))}
     write_json(run_dir / "cluster_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
@@ -3170,17 +3303,6 @@ def command_render(args: argparse.Namespace) -> None:
         raise SystemExit(1)
     cluster_count_audit = load_json(count_audit_path)
     post_count_reviews = post_excerpt_count_review_map(args.post_count_reviews)
-    cluster_member_unresolved = load_jsonl(run_dir / "cluster_member_semantic_review_queue.unresolved.jsonl") if (run_dir / "cluster_member_semantic_review_queue.unresolved.jsonl").exists() else []
-    if cluster_member_unresolved:
-        summary = {
-            "status": "REVIEW_REQUIRED",
-            "stage": "cluster_member_semantic_review",
-            "unreviewed_members": len(cluster_member_unresolved),
-            "output_not_replaced": str(args.output.resolve()),
-        }
-        write_json(run_dir / "render_summary.json", summary)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
-        raise SystemExit(1)
     payload = load_json(run_dir / "clustered_items.json")
     definitions = payload["definitions"]
     items = payload["items"]
@@ -3249,28 +3371,20 @@ def command_render(args: argparse.Namespace) -> None:
                     row, {"text": excerpt}, definition,
                     period_config["targets"][batch], {},
                 )
+                context_start = max(0, positions[0][0] - 60)
+                context_end = min(len(body), positions[-1][1] + 60)
                 promotion_markers = promotion_review_markers(excerpt)
                 short_excerpt = len(excerpt) < EXCERPT_PREFERRED_MIN
                 semantic_input = {
-                    "view_id": view_id, "batch": batch, "cluster_id": str(definition["id"]),
+                    "view_id": view_id, "source_id": row["id"], "batch": batch, "cluster_id": str(definition["id"]),
                     "cluster_title": definition["title"], "cluster_stance": definition["stance"],
-                    "excerpt": excerpt,
                     "cleaned_excerpt": excerpt,
-                    "raw_excerpt": raw_excerpt,
-                    "full_source_text": body,
-                    "adjacent_context": clean(item.get("window", {}).get("text")),
-                    "evidence_scopes": {
-                        "target_evidence": "raw_excerpt",
-                        "work_consistency_evidence": "raw_excerpt",
-                        "aspect_evidence": "cleaned_excerpt",
-                        "stance_evidence": "cleaned_excerpt",
-                        "specific_support_evidence": "cleaned_excerpt",
-                    },
+                    **({"raw_excerpt": raw_excerpt} if raw_excerpt != excerpt else {}),
+                    "context_before": body[context_start:positions[0][0]],
+                    "context_after": body[positions[-1][1]:context_end],
                     "promotion_markers": promotion_markers,
                     "excerpt_length": len(excerpt),
-                    "preferred_length": [EXCERPT_PREFERRED_MIN, EXCERPT_MAX],
                     "short_excerpt": short_excerpt,
-                    "instruction": "独立判断最终摘录是否指向目标作品、支持该方面、立场一致、作品内部信息不矛盾且可独立理解；摘录优先控制在70至150字，并同时保留完整判断和至少一处具体依据。短于70字时先回看全文补足同一观点、同一立场的依据；全文确实没有可补内容时，只有摘录仍包含具体台词、动作、情节、表演处理、争议事实或可复核分析依据才可 keep，并必须填写 short_excerpt_justified=true、具体 short_excerpt_reason、specific_support_passed=true 和摘录中的逐字 specific_support_evidence。作品标签、人物名及好看、封神、绝了、笑点拉满、期待等泛泛态度不算具体依据，即使原文再无内容也应 drop，failed_checks 填 evidence_specificity。禁止拼入无关内容凑字。超过150字不能 keep。所有合格独立表达都应 keep，不设每簇数量配额。纯抽奖、购票、报名、礼包、扫码、活动规则或演员资料没有独立观点，不能 keep；若摘录含 promotion_markers，keep 时必须另给 independent_opinion_passed=true 和摘录中的逐字 opinion_evidence。来源中夹有宣传内容但另有完整判断时，重截并保留判断。只有回看全文并尝试重截后仍不合格才可 drop；若只是方面或立场错配，必须先检查能否转入其他现有簇或形成新簇",
                 }
                 semantic_inputs.append(semantic_input)
                 semantic = semantic_reviews.get(view_id)
@@ -3470,6 +3584,26 @@ def command_render(args: argparse.Namespace) -> None:
         dataset["total"] += batch_count
         staged_dataset["total"] += staged_count
     write_json(run_dir / "workbench_dataset.staged.json", staged_dataset)
+    final_review_chunks = write_jsonl_chunks(
+        run_dir / "final_excerpt_review_chunks", semantic_inputs
+    )
+    write_json(run_dir / "final_excerpt_review_contract.json", {
+        "scope": "current_period_final_excerpt_review_contract",
+        "instruction": "逐条判断最终摘录是否指向目标作品、支持所在观点、立场一致、作品信息不冲突且可独立理解。优先保留70至150字并含完整判断和具体依据；短于70字先按 source_id 回查全文重截，无法补足时只有仍含具体可复核依据才可保留。泛泛态度、纯标签、纯促销、纯资料应删除。方面或立场错配时先转入合适观点簇。所有证据必须是输入指定文本范围中的逐字子串，不得改写。",
+        "allowed_decisions": ["keep", "drop"],
+        "full_source_lookup_file": "retained_sources.jsonl",
+        "evidence_scopes": {
+            "target_evidence": "raw_excerpt；若该字段省略则与 cleaned_excerpt 完全相同",
+            "work_consistency_evidence": "raw_excerpt；若该字段省略则与 cleaned_excerpt 完全相同",
+            "aspect_evidence": "cleaned_excerpt",
+            "stance_evidence": "cleaned_excerpt",
+            "specific_support_evidence": "cleaned_excerpt"
+        },
+        "preferred_length": [EXCERPT_PREFERRED_MIN, EXCERPT_MAX],
+        "chunk_size": 60,
+        "chunk_files": [str(path.relative_to(run_dir)) for path in final_review_chunks],
+        "do_not_repeat_instruction_per_item": True,
+    })
     write_jsonl(run_dir / "excerpt_semantic_review_input.jsonl", semantic_inputs)
     write_jsonl(run_dir / "excerpt_semantic_review_queue.unresolved.jsonl", semantic_pending)
     write_jsonl(run_dir / "excerpt_semantic_review_rejected.jsonl", semantic_rejected)
@@ -3504,7 +3638,6 @@ def command_verify(args: argparse.Namespace) -> None:
     low = load_jsonl(run_dir / "cluster_review_queue.jsonl")
     cluster_set_unresolved = load_jsonl(run_dir / "cluster_set_review_queue.unresolved.jsonl") if (run_dir / "cluster_set_review_queue.unresolved.jsonl").exists() else []
     cluster_count_unresolved = load_jsonl(run_dir / "cluster_count_review_queue.unresolved.jsonl") if (run_dir / "cluster_count_review_queue.unresolved.jsonl").exists() else []
-    cluster_member_unresolved = load_jsonl(run_dir / "cluster_member_semantic_review_queue.unresolved.jsonl") if (run_dir / "cluster_member_semantic_review_queue.unresolved.jsonl").exists() else []
     source_unresolved = load_jsonl(run_dir / "source_review_queue.unresolved.jsonl") if (run_dir / "source_review_queue.unresolved.jsonl").exists() else []
     excerpt_unresolved = load_jsonl(run_dir / "excerpt_semantic_review_queue.unresolved.jsonl") if (run_dir / "excerpt_semantic_review_queue.unresolved.jsonl").exists() else []
     failures = []
@@ -3629,8 +3762,6 @@ def command_verify(args: argparse.Namespace) -> None:
         failures.append(f"仍有 {len(cluster_set_unresolved)} 个观点簇集合审查未完成")
     if cluster_count_unresolved:
         failures.append(f"仍有 {len(cluster_count_unresolved)} 个批次的观点簇数量审查未完成")
-    if cluster_member_unresolved:
-        failures.append(f"仍有 {len(cluster_member_unresolved)} 条成员与观点标题语义审查未完成")
     if source_unresolved:
         failures.append(f"仍有 {len(source_unresolved)} 条来源AI复核队列未完成")
     if excerpt_unresolved:
@@ -3665,7 +3796,6 @@ def command_verify(args: argparse.Namespace) -> None:
         "unreviewed_final_excerpts": len(excerpt_unresolved),
         "unreviewed_cluster_set": len(cluster_set_unresolved),
         "unreviewed_cluster_count": len(cluster_count_unresolved),
-        "unreviewed_cluster_members": len(cluster_member_unresolved),
         "output": str(output),
     }
     write_json(run_dir / "verification.json", result)
@@ -3697,7 +3827,6 @@ def parser() -> argparse.ArgumentParser:
     cluster.add_argument("--clusters", required=True, type=Path)
     cluster.add_argument("--overrides", type=Path)
     cluster.add_argument("--set-reviews", type=Path)
-    cluster.add_argument("--member-reviews", type=Path)
     cluster.set_defaults(func=command_cluster)
     render = commands.add_parser("render")
     render.add_argument("--run", required=True, type=Path)

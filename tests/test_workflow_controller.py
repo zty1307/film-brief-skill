@@ -90,12 +90,17 @@ for _ in range(30):
     if state["status"] == "COMPLETE":
         break
     if state["status"] == "READY_TO_ADVANCE":
+        if stage == "verify":
+            assert not OUTPUT.exists(), "正式 HTML 只能在 verify PASS 后发布"
         state = run("advance", "--workspace", str(WORKSPACE), "--timeout", "0.2")
         continue
     assert state["status"] == "REVIEW_REQUIRED" and state.get("review_requirements"), state
     if stage == "source_review":
+        assert state.get("input_files") and state.get("full_input_file")
         template = load(Path(state["template"]))
         queue = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert queue and "evidence_source_text" not in queue[0]
+        assert "full_source_lookup" in queue[0] and "review_evidence_candidates" in queue[0]
         template["reviews"] = []
         for item in queue:
             candidate = item["review_evidence_candidates"][0]
@@ -105,17 +110,12 @@ for _ in range(30):
                 "evidence_candidate_index": candidate["candidate_index"],
             })
         dump(Path(state["required_file"]), template)
-    elif stage == "dedup_review":
-        template = load(Path(state["template"]))
-        assert template["reviews"], "dedup template must prefill every candidate pair"
-        for item in template["reviews"]:
-            item["decision"] = "independent"
-            item["reason"] = "观点相近但作者与具体措辞独立"
-        dump(Path(state["required_file"]), template)
     elif stage == "cluster_discovery":
+        assert state.get("input_files") and state.get("full_input_file")
         discovery_rows = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
         assert discovery_rows and "discovery_passages" in discovery_rows[0]
-        assert "body" not in discovery_rows[0] and state.get("full_source_file")
+        assert "body" not in discovery_rows[0] and "quality" not in discovery_rows[0]
+        assert state.get("full_source_file")
         template = load(Path(state["template"]))
         template["batches"]["电视剧《测试剧》"] = [{
             "id": "P01",
@@ -174,25 +174,14 @@ for _ in range(30):
                 "reason": "已检查簇的颗粒度，当前单簇准确覆盖唯一测试表达",
             }
         dump(Path(state["required_file"]), template)
-    elif stage == "cluster_member_review":
-        template = load(Path(state["template"]))
-        member_input = load(Path(state["input_file"]))
-        template["reviews"] = {}
-        for item in member_input["members"]:
-            template["reviews"][item["review_key"]] = {
-                "fingerprint": item["fingerprint"], "decision": "pass", "target_passed": True,
-                "title_support_passed": True, "stance_passed": True, "scope_checked": True,
-                "source_role_checked": True, "supported_claim_indices": [0, 1],
-                "evidence": "表演细腻自然，人物关系也显得真实可信",
-                "reason": "片段直接肯定表演细腻自然，并说明人物关系真实可信",
-            }
-        dump(Path(state["required_file"]), template)
     elif stage == "final_excerpt_review":
+        assert state.get("input_files") and state.get("full_input_file")
         template = load(Path(state["template"]))
         inputs = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
         template["reviews"] = {}
         for item in inputs:
-            excerpt = item["excerpt"]
+            assert "body" not in item and "excerpt" not in item and "full_source_lookup" not in item
+            excerpt = item["cleaned_excerpt"]
             template["reviews"][item["view_id"]] = {
                 "decision": "keep", "target_passed": True, "target_evidence": "《测试剧》",
                 "aspect_passed": True, "aspect_evidence": "表演细腻自然", "stance": "positive",
@@ -218,20 +207,21 @@ order_audit = load(WORKSPACE / "run" / "workbench_order_audit.json")
 assert order_audit["random"] is False
 assert order_audit["clusters"][0]["ordered_sources"][0]["source_id"]
 manifest = load(WORKSPACE / "workflow_manifest.json")
-expected_stages = ["prepare", "link_check", "select", "cluster_base", "cluster_set", "cluster_final", "render_probe", "render_final", "verify"]
+expected_stages = ["prepare", "link_check", "select", "cluster_base", "cluster_final", "render_probe", "render_final", "verify"]
 history_stages = [item["stage"] for item in manifest["history"]]
 positions = [history_stages.index(stage) for stage in expected_stages]
 assert positions == sorted(positions), history_stages
-cluster_set_command = manifest["stages"]["cluster_set"]["command"]
 cluster_final_command = manifest["stages"]["cluster_final"]["command"]
-assert "--set-reviews" in cluster_set_command and "--member-reviews" not in cluster_set_command
-assert "--set-reviews" in cluster_final_command and "--member-reviews" in cluster_final_command
-assert str(OUTPUT.resolve()) in manifest["stages"]["render_final"]["output_hashes"]
+assert "--set-reviews" in cluster_final_command and "--member-reviews" not in cluster_final_command
+link_command = manifest["stages"]["link_check"]["command"]
+assert str((WORKSPACE / "run" / "source_link_candidates.jsonl").resolve()) in link_command
+assert str((WORKSPACE / "run" / "workbench.verified-candidate.html").resolve()) in manifest["stages"]["render_final"]["output_hashes"]
+assert str(OUTPUT.resolve()) in manifest["stages"]["verify"]["output_hashes"]
 assert str((WORKSPACE / "run" / "verification.json").resolve()) in manifest["stages"]["verify"]["output_hashes"]
 
-# An existing v1.1.1 workspace does not have the compact discovery file.  The
+# An existing earlier workspace does not have the discovery seed file.  The
 # controller must regenerate selection outputs instead of crashing at cluster discovery.
-(WORKSPACE / "run" / "cluster_discovery_input.jsonl").unlink()
+(WORKSPACE / "run" / "cluster_discovery_seed_input.jsonl").unlink()
 upgrade_state = run("status", "--workspace", str(WORKSPACE))
 assert upgrade_state["status"] == "READY_TO_ADVANCE" and upgrade_state["stage"] == "select", upgrade_state
 print(json.dumps({"status": "PASS", "workspace": str(WORKSPACE), "output": str(OUTPUT), "verification": verification}, ensure_ascii=False, indent=2))
