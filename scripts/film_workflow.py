@@ -100,6 +100,11 @@ STAGE_GUIDANCE = {
         "优先形成70至150字的完整判断和具体依据；清除话题标签、表情、链接、账号标记及分享套话",
         "好看、封神、期待、笑点拉满等泛泛态度没有具体依据时不进入展示层",
     ],
+    "excerpt_preflight": [
+        "只处理 excerpt_preflight_failures.json 列出的项目，其他摘录和复核结果保持不变",
+        "从对应来源全文选择一至两个按原顺序出现的逐字片段，不改写、不补字、不调换顺序",
+        "修复空摘录、残缺边界、引号不成对、社交标签残留或超过150字等确定性格式问题",
+    ],
     "final_excerpt_review": [
         "审核最终清洗后展示文字本身，常规项只核对方面、局部立场和语义完整性；对象与跨作品字段仅在输入明确标记时填写",
         "常规保留项按 excerpt_segments 编号选择方面和立场证据，不抄原文、不写保留理由；只有候选均不适用时才填写逐字证据",
@@ -448,6 +453,47 @@ def cumulative_review_payload(
     }
 
 
+def cumulative_fingerprinted_review_payload(
+    workflow_id: str,
+    input_paths: list[Path],
+    current: dict | None,
+    ledger_path: Path,
+    input_map: dict[str, dict],
+) -> dict:
+    """Keep final-review answers whose own item fingerprint is still current."""
+    merged: dict[str, dict] = {}
+
+    def merge_matching(payload: dict | None) -> None:
+        if not isinstance(payload, dict):
+            return
+        meta = payload.get("_workflow")
+        if not isinstance(meta, dict) or clean(meta.get("workflow_id")) != workflow_id:
+            return
+        for view_id, review in list_review_map(payload, "view_id").items():
+            current_item = input_map.get(view_id)
+            if (
+                current_item
+                and clean(review.get("review_fingerprint"))
+                == clean(current_item.get("review_fingerprint"))
+            ):
+                merged[view_id] = review
+
+    if ledger_path.exists():
+        merge_matching(review_payload(ledger_path))
+    merge_matching(current)
+    return {
+        "scope": "current_period_final_excerpt_semantic_reviews",
+        "_workflow": binding(workflow_id, input_paths),
+        "contract": {
+            "script_owned_cumulative_ledger": True,
+            "current_submission_only": True,
+            "current_same_id_wins": True,
+            "preserve_unchanged_item_fingerprints": True,
+        },
+        "reviews": merged,
+    }
+
+
 def cluster_override_validation_issues(
     retained_sources: list[dict], cluster_payload: dict, override_payload: dict,
     period_config: dict | None = None,
@@ -788,6 +834,7 @@ def final_excerpt_review_template_payload(
         if not view_id:
             continue
         reviews[view_id] = {
+            "review_fingerprint": clean(item.get("review_fingerprint")),
             "decision": "",
             "aspect_evidence_candidate_index": None,
             "stance": "",
@@ -839,6 +886,8 @@ def final_excerpt_review_is_filled(review: dict, input_item: dict | None = None)
     if decision not in {"keep", "drop"}:
         return False
     input_item = input_item or {}
+    if clean(review.get("review_fingerprint")) != clean(input_item.get("review_fingerprint")):
+        return False
     if decision == "keep":
         if clean(review.get("stance")) not in {"positive", "objective", "negative"}:
             return False
@@ -1045,6 +1094,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
                 "stable_source_id: descending tie-breaker",
             ],
         },
+        "execution_rule": "正常推进只读取当前 input/template/contract；除非状态为 BROKEN，不扫描脚本、不遍历全部产物、不创建临时辅助程序",
     }
 
     def result(status: str, stage: str, message: str, **extra) -> dict:
@@ -1395,11 +1445,38 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             return result("REVIEW_REQUIRED", "excerpt_review", "excerpt_reviews.json 与当前最终归簇不一致", required_file=str(p["excerpts"]), template=str(excerpt_template), input_file=str(p['run'] / 'clustered_items.json'), binding_issue=excerpt_issue)
         render_probe_inputs.append(p["excerpts"])
     render_probe_token = digest_paths(render_probe_inputs)
+    preflight_path = p["run"] / "excerpt_preflight_failures.json"
     if not stage_fresh(manifest, "render_probe", render_probe_token, [
         p["run"] / "excerpt_semantic_review_input.jsonl",
         p["run"] / "final_excerpt_review_contract.json",
+        preflight_path,
     ]):
         return result("READY_TO_ADVANCE", "render_probe", "可以生成候选摘录与最终摘录语义复核输入；这一步不会发布 HTML", action="render_probe", input_digest=render_probe_token)
+
+    preflight_failures = read_json(preflight_path).get("failures", [])
+    if preflight_failures:
+        existing_excerpt_reviews = {}
+        excerpt_payload = review_payload(p["excerpts"])
+        if not binding_issue(excerpt_payload, workflow_id, [p["run"] / "clustered_items.json"]):
+            existing_excerpt_reviews = list_review_map(excerpt_payload, "view_id")
+        for failure in preflight_failures:
+            existing_excerpt_reviews.setdefault(clean(failure.get("view_id")), {
+                "fragments": [], "positions": [], "reason": "",
+            })
+        write_json(excerpt_template, {
+            "scope": "current_period_verbatim_excerpt_reviews",
+            "_workflow": binding(workflow_id, [p["run"] / "clustered_items.json"]),
+            "contract": {"fix_only_listed_view_ids": True, "one_or_two_verbatim_fragments": True},
+            "reviews": existing_excerpt_reviews,
+        })
+        return result(
+            "REVIEW_REQUIRED", "excerpt_preflight",
+            "先修复脚本已定位的摘录格式问题，再进入最终语义复核；未受影响条目无需处理",
+            required_file=str(p["excerpts"]), template=str(excerpt_template),
+            input_file=str(preflight_path), full_source_file=str(p["run"] / "retained_sources.jsonl"),
+            failure_count=len(preflight_failures),
+            affected_view_ids=[clean(item.get("view_id")) for item in preflight_failures],
+        )
 
     semantic_inputs = [
         p["run"] / "excerpt_semantic_review_input.jsonl",
@@ -1407,6 +1484,8 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
     ]
     semantic_payload = review_payload(p["semantic"])
     semantic_issue = binding_issue(semantic_payload, workflow_id, semantic_inputs)
+    if semantic_issue == "input_fingerprint_stale":
+        semantic_issue = ""
     semantic_review_items = read_jsonl(semantic_inputs[0])
     semantic_input_map = {
         clean(item.get("view_id")): item
@@ -1414,9 +1493,8 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         if clean(item.get("view_id"))
     }
     required_views = {clean(item.get("view_id")) for item in semantic_review_items}
-    semantic_ledger = cumulative_review_payload(
-        workflow_id, semantic_inputs, semantic_payload, p["semantic_ledger"],
-        "view_id", "current_period_final_excerpt_semantic_reviews", reviews_as_dict=True,
+    semantic_ledger = cumulative_fingerprinted_review_payload(
+        workflow_id, semantic_inputs, semantic_payload, p["semantic_ledger"], semantic_input_map,
     )
     write_json(p["semantic_ledger"], semantic_ledger)
     semantic_review_map = list_review_map(semantic_ledger, "view_id")
@@ -1664,6 +1742,7 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
         outputs = [
             p["run"] / "excerpt_semantic_review_input.jsonl",
             p["run"] / "final_excerpt_review_contract.json",
+            p["run"] / "excerpt_preflight_failures.json",
         ]
         if action == "render_final":
             outputs = [

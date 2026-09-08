@@ -181,8 +181,10 @@ for _ in range(30):
             assert "body" not in item and "excerpt" not in item and "full_source_lookup" not in item
             assert item["target_review_required"] is False
             assert item["work_consistency_review_required"] is False
+            assert "context_before" not in item and "context_after" not in item
             excerpt = "".join(item["excerpt_segments"].values())
             template["reviews"][item["view_id"]] = {
+                "review_fingerprint": item["review_fingerprint"],
                 "decision": "keep", "aspect_evidence_candidate_index": 1, "stance": "positive",
                 "stance_evidence_candidate_index": 1, "self_contained": True,
             }

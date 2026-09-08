@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -377,6 +379,7 @@ assert "测试\tP01" in set_template["reviews"]
 assert not w.cluster_set_review_is_filled(set_template["reviews"]["测试\tP01"])
 excerpt_input = {
     "view_id": "source::P01",
+    "review_fingerprint": "fp-1",
     "excerpt_segments": {"1": "演员表演自然，", "2": "人物关系真实可信。"},
 }
 excerpt_template = w.final_excerpt_review_template_payload("wf", [], [excerpt_input])
@@ -402,12 +405,14 @@ assert w.final_excerpt_review_is_filled(direct_fallback_review, excerpt_input)
 conditional_template = w.final_excerpt_review_template_payload(
     "wf", [], [{
         "view_id": "conditional::P01",
+        "review_fingerprint": "fp-2",
         "target_review_required": True,
         "work_consistency_review_required": True,
     }]
 )
 conditional_input = {
     "view_id": "conditional::P01",
+    "review_fingerprint": "fp-2",
     "excerpt_segments": {"1": "《测试剧》表演自然。"},
     "target_review_required": True,
     "work_consistency_review_required": True,
@@ -423,6 +428,71 @@ conditional_review.update({
     "work_consistency_passed": True, "work_consistency_evidence": "《测试剧》",
 })
 assert w.final_excerpt_review_is_filled(conditional_review, conditional_input)
+
+# Short-excerpt exceptions need concrete support, not a generic praise line.
+assert not p.short_excerpt_support_is_specific("《赴山海》打戏太好看了！", "打戏太好看了")
+assert p.short_excerpt_support_is_specific(
+    "演员用眼神和停顿推进情绪，表演显得细腻自然。",
+    "演员用眼神和停顿推进情绪",
+)
+
+# Changing one excerpt keeps reviews for unchanged item fingerprints, so a
+# targeted re-excerpt does not force hundreds of unrelated reviews to rerun.
+fingerprint_root = Path(tempfile.mkdtemp(prefix="film-fingerprint-test-"))
+fingerprint_input = fingerprint_root / "input.jsonl"
+fingerprint_input.write_text('{"view_id":"a","review_fingerprint":"old-a"}\n{"view_id":"b","review_fingerprint":"same-b"}\n', encoding="utf-8")
+old_ledger = {
+    "scope": "current_period_final_excerpt_semantic_reviews",
+    "_workflow": w.binding("wf-fp", [fingerprint_input]),
+    "reviews": {
+        "a": {"review_fingerprint": "old-a", "decision": "drop"},
+        "b": {"review_fingerprint": "same-b", "decision": "drop"},
+    },
+}
+w.write_json(fingerprint_root / "ledger.json", old_ledger)
+fingerprint_input.write_text('{"view_id":"a","review_fingerprint":"new-a"}\n{"view_id":"b","review_fingerprint":"same-b"}\n', encoding="utf-8")
+fingerprint_map = {
+    "a": {"view_id": "a", "review_fingerprint": "new-a"},
+    "b": {"view_id": "b", "review_fingerprint": "same-b"},
+}
+preserved = w.cumulative_fingerprinted_review_payload(
+    "wf-fp", [fingerprint_input], None, fingerprint_root / "ledger.json", fingerprint_map,
+)
+assert set(preserved["reviews"]) == {"b"}
+
+# Deterministic excerpt-format errors are exposed before the model reviews the
+# whole final queue.
+preflight_root = Path(tempfile.mkdtemp(prefix="film-preflight-test-"))
+(preflight_root / "cluster_set_review_queue.unresolved.jsonl").write_text("", encoding="utf-8")
+(preflight_root / "cluster_count_review_queue.unresolved.jsonl").write_text("", encoding="utf-8")
+w.write_json(preflight_root / "cluster_count_review_audit.json", {
+    "测试": {"status": "PASS", "cluster_count": 1},
+})
+w.write_json(preflight_root / "period_config.json", {
+    "batch_order": ["测试"],
+    "targets": {"测试": {"strong_terms": ["测试剧"], "weak_terms": [], "auxiliary_terms": [], "comparison_terms": []}},
+})
+bad_body = "。演员用眼神和停顿推进情绪，表演细腻自然。"
+w.write_json(preflight_root / "clustered_items.json", {
+    "definitions": {"测试": [{"id": "P01", "title": "肯定演员细腻自然的表演，认为人物情绪真实可信", "stance": "positive", "required_any": ["表演"]}]},
+    "items": [{"batch": "测试", "cluster_id": "P01", "source": {"id": "bad", "batch": "测试", "channel": "微博", "author": "用户", "title": "测试剧", "body": bad_body, "published": "", "url": "", "decision": "retain_consensus"}, "window": {"start": 0, "end": len(bad_body)}}],
+})
+w.write_json(preflight_root / "excerpt_reviews.json", {
+    "scope": "current_period_verbatim_excerpt_reviews",
+    "reviews": {"bad::P01": {"fragments": [bad_body]}},
+})
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        p.command_render(type("Args", (), {
+            "run": preflight_root, "output": preflight_root / "out.html",
+            "excerpt_reviews": preflight_root / "excerpt_reviews.json",
+            "semantic_reviews": None, "post_count_reviews": None,
+        })())
+except SystemExit as exc:
+    assert exc.code == 1
+preflight = w.read_json(preflight_root / "excerpt_preflight_failures.json")
+assert preflight["failures"][0]["view_id"] == "bad::P01"
+assert preflight["failures"][0]["current_excerpt"].startswith("。")
 
 # Weak-model chunk submissions are accumulated by the controller, so a model
 # never has to rewrite prior answers or the full review file.

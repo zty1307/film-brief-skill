@@ -127,6 +127,7 @@ DETAIL_CUE = re.compile(r"第[一二三四五六七八九十\d]+集|眼神|动�
 DISPLAY_NORMALIZATION = "remove_social_markup_v3"
 EXCERPT_PREFERRED_MIN = 70
 EXCERPT_MAX = 150
+FINAL_REVIEW_CHUNK_SIZE = 80
 DISPLAY_MARKDOWN_LINK = re.compile(r"!?\[[^\]\r\n]{0,80}\]\((?:https?://|//)[^)\s]+\)", re.I)
 DISPLAY_RAW_URL = re.compile(r"(?:https?://|www\.)[^\s，。！？；]+", re.I)
 DISPLAY_HASHTAG_PAIR = re.compile(r"#[^#\s\r\n]{1,80}#")
@@ -536,6 +537,47 @@ def excerpt_evidence_segments(value: object) -> dict[str, str]:
     if not segments:
         segments = [text]
     return {str(index): segment for index, segment in enumerate(segments, start=1)}
+
+
+def semantic_review_fingerprint(item: dict) -> str:
+    """Bind one final review to its own excerpt and cluster contract."""
+    payload = {
+        key: item.get(key)
+        for key in (
+            "view_id", "cluster_id", "cluster_title", "cluster_stance",
+            "excerpt_segments", "promotion_markers", "short_excerpt",
+            "target_review_required", "work_consistency_review_required",
+            "work_conflict_markers",
+        )
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def short_excerpt_support_is_specific(excerpt: object, evidence: object) -> bool:
+    """Reject generic short praise while preserving concise, concrete evidence."""
+    excerpt_text = clean(excerpt)
+    evidence_text = clean(evidence)
+    if not evidence_text or evidence_text not in excerpt_text or len(normalized(evidence_text)) < 8:
+        return False
+    if DETAIL_CUE.search(evidence_text) or FACT_WARNING.search(evidence_text):
+        return True
+    dimensions = set(DIMENSION.findall(evidence_text))
+    has_reasoning = bool(re.search(r"因为|在于|通过|例如|比如|其中|从.{0,12}(?:看出|体现)|使得|导致", evidence_text))
+    return bool(len(dimensions) >= 2 and has_reasoning and (OPINION.search(evidence_text) or JUDGEMENT.search(evidence_text)))
+
+
+def stance_evidence_conflicts(expected: object, evidence: object) -> bool:
+    """Use deterministic polarity only as an opposite-stance safety veto."""
+    expected_value = clean(expected)
+    inferred = stance(clean(evidence))
+    if expected_value == "positive":
+        return inferred == "负向"
+    if expected_value == "negative":
+        return inferred == "正向"
+    if expected_value == "objective":
+        return inferred != "混合或中性"
+    return True
 
 
 def indexed_excerpt_evidence(review: dict, input_item: dict, field: str) -> str:
@@ -3126,6 +3168,8 @@ def validate_embedded_dataset(dataset: dict, source: Path, *, allow_legacy: bool
                             failures.append(f"短摘录未确认含有具体依据：{source} / {view_id}")
                         if not support_evidence or support_evidence not in excerpt:
                             failures.append(f"短摘录缺少逐字具体依据：{source} / {view_id}")
+                        elif not short_excerpt_support_is_specific(excerpt, support_evidence):
+                            failures.append(f"短摘录具体依据仍是泛泛态度：{source} / {view_id}")
                 if isinstance(length_review, dict):
                     if int(length_review.get("length", -1)) != excerpt_length:
                         failures.append(f"摘录长度记录与展示文字不一致：{source} / {view_id}")
@@ -3357,9 +3401,13 @@ def command_render(args: argparse.Namespace) -> None:
     semantic_pending = []
     semantic_rejected = []
     failures = []
+    preflight_failures = []
     drop_reason_counts: Counter[tuple[str, str, str]] = Counter()
     drop_reason_view_ids: dict[tuple[str, str, str], list[str]] = defaultdict(list)
     drop_counts: Counter[tuple[str, str]] = Counter()
+    short_reason_counts: Counter[tuple[str, str]] = Counter()
+    short_reason_view_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
+    short_keep_counts: Counter[str] = Counter()
     cluster_display_audit = []
     post_count_review_input = []
     post_count_review_audit = {}
@@ -3375,6 +3423,8 @@ def command_render(args: argparse.Namespace) -> None:
                 row = item["source"]
                 body = source_text(row)
                 view_id = f"{row['id']}::{definition['id']}"
+                raw_excerpt = ""
+                excerpt = ""
                 try:
                     review = excerpt_reviews.get(view_id)
                     if review:
@@ -3400,7 +3450,18 @@ def command_render(args: argparse.Namespace) -> None:
                     if unbalanced_display_quotes(excerpt):
                         raise ValueError("展示片段引号不成对，需回看全文重截")
                 except (ValueError, IndexError) as exc:
-                    failures.append({"view_id": view_id, "stage": "verbatim", "issue": str(exc)})
+                    failure = {
+                        "view_id": view_id,
+                        "source_id": row["id"],
+                        "batch": batch,
+                        "cluster_id": str(definition["id"]),
+                        "cluster_title": definition["title"],
+                        "stage": "verbatim",
+                        "issue": str(exc),
+                        "current_excerpt": excerpt or clean_display_excerpt(raw_excerpt),
+                    }
+                    failures.append(failure)
+                    preflight_failures.append(failure)
                     continue
 
                 # 最终立场不再复用归簇阶段的 passage_stance；它由独立摘录语义复核给出。
@@ -3420,8 +3481,6 @@ def command_render(args: argparse.Namespace) -> None:
                     "view_id": view_id, "source_id": row["id"], "batch": batch, "cluster_id": str(definition["id"]),
                     "cluster_title": definition["title"], "cluster_stance": definition["stance"],
                     "excerpt_segments": excerpt_segments,
-                    "context_before": body[context_start:positions[0][0]],
-                    "context_after": body[positions[-1][1]:context_end],
                     "promotion_markers": promotion_markers,
                     "excerpt_length": len(excerpt),
                     "short_excerpt": short_excerpt,
@@ -3430,6 +3489,10 @@ def command_render(args: argparse.Namespace) -> None:
                     **({"work_conflict_markers": work_conflict_markers} if work_conflict_markers else {}),
                     **({"raw_excerpt": raw_excerpt} if raw_excerpt != excerpt and (target_review_required or work_conflict_markers) else {}),
                 }
+                if short_excerpt or target_review_required or work_conflict_markers or promotion_markers:
+                    semantic_input["context_before"] = body[context_start:positions[0][0]]
+                    semantic_input["context_after"] = body[positions[-1][1]:context_end]
+                semantic_input["review_fingerprint"] = semantic_review_fingerprint(semantic_input)
                 semantic_inputs.append(semantic_input)
                 semantic = semantic_reviews.get(view_id)
                 item_failures = []
@@ -3438,6 +3501,8 @@ def command_render(args: argparse.Namespace) -> None:
                     item_failures.append("缺少独立的最终摘录语义复核")
                 else:
                     semantic_decision = clean(semantic.get("decision"))
+                    if clean(semantic.get("review_fingerprint")) != semantic_input["review_fingerprint"]:
+                        item_failures.append("最终摘录语义复核与当前条目指纹不一致")
                     if semantic_decision not in {"keep", "drop"}:
                         item_failures.append("最终摘录语义复核 decision 必须为 keep 或 drop")
                     if semantic_decision == "keep":
@@ -3451,6 +3516,8 @@ def command_render(args: argparse.Namespace) -> None:
                         for evidence, label in ((aspect_evidence, "方面证据"), (stance_evidence, "立场证据")):
                             if not evidence or evidence not in excerpt:
                                 item_failures.append(f"{label}候选编号无效，且未提供最终摘录中的逐字证据")
+                        if stance_evidence and stance_evidence_conflicts(definition["stance"], stance_evidence):
+                            item_failures.append("立场证据自身呈现的立场与观点簇不一致")
                         if target_review_required:
                             target_evidence = clean(semantic.get("target_evidence"))
                             if semantic.get("target_passed") is not True:
@@ -3477,6 +3544,13 @@ def command_render(args: argparse.Namespace) -> None:
                             support_evidence = indexed_excerpt_evidence(semantic, semantic_input, "specific_support_evidence")
                             if not support_evidence or support_evidence not in excerpt:
                                 item_failures.append("不足70字的摘录缺少最终摘录中的逐字具体依据")
+                            elif not short_excerpt_support_is_specific(excerpt, support_evidence):
+                                item_failures.append("不足70字的摘录只有泛泛态度，具体依据未包含动作、台词、场景、数据或因果分析")
+                            if not item_failures:
+                                short_keep_counts[batch] += 1
+                                reason_key = drop_reason_fingerprint(semantic.get("short_excerpt_reason"))
+                                short_reason_counts[(batch, reason_key)] += 1
+                                short_reason_view_ids[(batch, reason_key)].append(view_id)
                     elif semantic_decision == "drop" and not item_failures:
                         drop_reason = clean(semantic.get("reason"))
                         if not drop_reason:
@@ -3664,9 +3738,31 @@ def command_render(args: argparse.Namespace) -> None:
         })
         dataset["total"] += batch_count
         staged_dataset["total"] += staged_count
+        batch_short_total = short_keep_counts[batch]
+        if batch_short_total >= 5:
+            repeated_reason, repeated_count = max(
+                (
+                    (reason, count)
+                    for (reason_batch, reason), count in short_reason_counts.items()
+                    if reason_batch == batch
+                ),
+                key=lambda pair: pair[1],
+            )
+            if repeated_count / batch_short_total >= 0.6:
+                failures.append({
+                    "view_id": f"{batch}::short-excerpt-reasons",
+                    "stage": "semantic_review_quality",
+                    "issue": (
+                        f"同一短摘录例外理由覆盖 {repeated_count}/{batch_short_total} 条：{repeated_reason}。"
+                        "短摘录例外必须逐来源说明原文为何无法补足，并提供真正具体的逐字依据"
+                    ),
+                    "affected_view_ids": short_reason_view_ids.get((batch, repeated_reason), []),
+                })
     write_json(run_dir / "workbench_dataset.staged.json", staged_dataset)
     final_review_chunks = write_jsonl_chunks(
-        run_dir / "final_excerpt_review_chunks", semantic_inputs
+        run_dir / "final_excerpt_review_chunks", semantic_inputs,
+        chunk_size=FINAL_REVIEW_CHUNK_SIZE,
+        max_bytes=90_000,
     )
     write_json(run_dir / "final_excerpt_review_contract.json", {
         "scope": "current_period_final_excerpt_review_contract",
@@ -3683,7 +3779,7 @@ def command_render(args: argparse.Namespace) -> None:
             "work_consistency_evidence_when_required": "raw_excerpt；若该字段省略则使用按序拼接的 excerpt_segments"
         },
         "preferred_length": [EXCERPT_PREFERRED_MIN, EXCERPT_MAX],
-        "chunk_size": 60,
+        "chunk_size": FINAL_REVIEW_CHUNK_SIZE,
         "chunk_files": [str(path.relative_to(run_dir)) for path in final_review_chunks],
         "do_not_repeat_instruction_per_item": True,
     })
@@ -3697,6 +3793,7 @@ def command_render(args: argparse.Namespace) -> None:
     })
     write_json(run_dir / "post_excerpt_cluster_count_review_audit.json", post_count_review_audit)
     write_json(run_dir / "render_failures.json", {"failures": failures})
+    write_json(run_dir / "excerpt_preflight_failures.json", {"failures": preflight_failures})
     if failures:
         failure_stages = {clean(item.get("stage")) for item in failures}
         summary = {"status": "REVIEW_REQUIRED", "stage": "post_excerpt_cluster_count_review" if failure_stages == {"post_excerpt_cluster_count_review"} else "render_repair", "staged_items": staged_dataset["total"], "accepted_items": dataset["total"], "reviewed_dropped_items": len(semantic_rejected), "failures": len(failures), "unreviewed_final_excerpts": len(semantic_pending), "post_excerpt_count_reviews_required": len(post_count_review_input), "output_not_replaced": str(args.output.resolve())}
