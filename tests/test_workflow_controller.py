@@ -97,11 +97,13 @@ for _ in range(30):
     assert state["status"] == "REVIEW_REQUIRED" and state.get("review_requirements"), state
     if stage == "source_review":
         assert state.get("input_file") and state.get("full_input_file")
+        assert state.get("full_source_file", "").endswith("normalized_sources.jsonl")
         assert state.get("chunk_index") == 1 and state.get("chunk_total") >= 1
         template = load(Path(state["template"]))
         queue = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
         assert queue and "evidence_source_text" not in queue[0]
-        assert "full_source_lookup" in queue[0] and "review_evidence_candidates" in queue[0]
+        assert "full_source_lookup" not in queue[0] and "review_evidence_candidates" in queue[0]
+        assert "stance" not in queue[0]
         template["reviews"] = []
         for item in queue:
             candidate = item["review_evidence_candidates"][0]
@@ -152,26 +154,20 @@ for _ in range(30):
             passage = item["samples"][0]["passage"]
             template["reviews"][item["review_key"]] = {
                 "fingerprint": item["fingerprint"], "decision": "pass", "report_role": "report_point",
-                "scope_type": "current_broadcast_reaction", "title_claims_passed": True,
+                "scope_type": "current_broadcast_reaction", "issues": [],
                 "title_claims": [
                     {"claim": "演员表演细腻自然", "supporting_source_ids": ids},
                     {"claim": "人物关系与情绪变化真实可信", "supporting_source_ids": ids},
                 ],
                 "member_support": {source_id: {"claim_indices": [0, 1], "evidence": "表演细腻自然，人物关系也显得真实可信"} for source_id in ids},
-                "stance_purity_passed": True, "scope_purity_passed": True,
-                "scope_reason": "均为当前播出后的剧集评价", "granularity_passed": True,
-                "granularity_reason": "成员共同评价表演细节及其带来的人物可信度",
-                "source_role_checked": True, "source_role_reason": "来源角色已核对",
                 "reason": "标题两项主张均有当前分配片段中的直接证据",
             }
             assert "表演细腻自然，人物关系也显得真实可信" in passage
         template["count_reviews"] = {}
         for item in count_input["batches"]:
             template["count_reviews"][item["review_key"]] = {
-                "fingerprint": item["fingerprint"], "decision": "pass", "cluster_count": item["cluster_count"],
-                "range_status": item["expected_range_status"], "reader_load_reviewed": True,
-                "overfragmentation_checked": True, "overbreadth_checked": True, "no_forced_merge_or_split": True,
-                "exception_approved": True, "exception_reason": "合成测试只有一个明确观点，强行扩充会制造不存在的观点",
+                "fingerprint": item["fingerprint"], "decision": "pass", "issues": [],
+                "exception_reason": "合成测试只有一个明确观点，强行扩充会制造不存在的观点",
                 "reason": "已检查簇的颗粒度，当前单簇准确覆盖唯一测试表达",
             }
         dump(Path(state["required_file"]), template)
@@ -185,11 +181,10 @@ for _ in range(30):
             assert "body" not in item and "excerpt" not in item and "full_source_lookup" not in item
             assert item["target_review_required"] is False
             assert item["work_consistency_review_required"] is False
-            excerpt = item["cleaned_excerpt"]
+            excerpt = "".join(item["excerpt_segments"].values())
             template["reviews"][item["view_id"]] = {
-                "decision": "keep", "aspect_evidence": "表演细腻自然", "stance": "positive",
-                "stance_evidence": "表演细腻自然", "self_contained": True,
-                "reason": "最终摘录完整呈现判断和具体表演依据",
+                "decision": "keep", "aspect_evidence_candidate_index": 1, "stance": "positive",
+                "stance_evidence_candidate_index": 1, "self_contained": True,
             }
             assert len(excerpt) >= 70
         dump(Path(state["required_file"]), template)

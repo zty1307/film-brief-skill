@@ -191,6 +191,14 @@ assert len(discovery["discovery_passages"]) == 1 and "body" not in discovery
 discovery_passage = discovery["discovery_passages"][0]
 assert p.source_text(discovery_row)[discovery_passage["start"]:discovery_passage["end"]] == discovery_passage["text"]
 
+# Final excerpt evidence choices are lossless and can be resolved by index.
+segment_source = "演员的眼神和停顿都很自然，人物关系也因此显得真实可信。"
+segments = p.excerpt_evidence_segments(segment_source)
+assert "".join(segments.values()) == segment_source
+indexed_review = {"aspect_evidence_candidate_index": 1}
+assert p.indexed_excerpt_evidence(indexed_review, {"excerpt_segments": segments}, "aspect_evidence") == segments["1"]
+assert not p.indexed_excerpt_evidence({"aspect_evidence_candidate_index": 99}, {"excerpt_segments": segments}, "aspect_evidence")
+
 
 # Post-excerpt count review uses the actual display clusters and has one clear contract.
 display_clusters = [{
@@ -200,11 +208,8 @@ display_clusters = [{
 count_issues, count_audit = p.post_excerpt_count_review_issues("测试", display_clusters, None)
 assert count_issues == ["missing_review"]
 valid_count_review = {
-    "fingerprint": count_audit["fingerprint"], "decision": "pass", "cluster_count": 1,
-    "range_status": "below_range", "reader_load_reviewed": True,
-    "no_forced_merge_or_split": True,
+    "fingerprint": count_audit["fingerprint"], "decision": "pass", "issues": [],
     "reason": "终审后仅剩一个真实观点，其他簇均无合格展示证据",
-    "exception_approved": True,
     "exception_reason": "强行补到九个簇会制造当前样本中不存在的观点",
 }
 count_issues, _ = p.post_excerpt_count_review_issues("测试", display_clusters, valid_count_review)
@@ -370,20 +375,29 @@ set_template = w.cluster_set_review_template_payload(
 )
 assert "测试\tP01" in set_template["reviews"]
 assert not w.cluster_set_review_is_filled(set_template["reviews"]["测试\tP01"])
-excerpt_template = w.final_excerpt_review_template_payload(
-    "wf", [], [{"view_id": "source::P01"}]
-)
+excerpt_input = {
+    "view_id": "source::P01",
+    "excerpt_segments": {"1": "演员表演自然，", "2": "人物关系真实可信。"},
+}
+excerpt_template = w.final_excerpt_review_template_payload("wf", [], [excerpt_input])
 assert "source::P01" in excerpt_template["reviews"]
 blank_excerpt_review = excerpt_template["reviews"]["source::P01"]
 assert not w.final_excerpt_review_is_filled(blank_excerpt_review)
-blank_excerpt_review.update({"decision": "keep", "reason": "已查看"})
-assert not w.final_excerpt_review_is_filled(blank_excerpt_review), "只有决定和理由不得跳过必填语义字段"
+blank_excerpt_review.update({"decision": "keep"})
+assert not w.final_excerpt_review_is_filled(blank_excerpt_review, excerpt_input), "只有决定不得跳过必填语义字段"
 blank_excerpt_review.update({
-    "aspect_evidence": "表演自然",
-    "stance": "positive", "stance_evidence": "表演自然",
+    "aspect_evidence_candidate_index": 1,
+    "stance": "positive", "stance_evidence_candidate_index": 2,
     "self_contained": True,
 })
-assert w.final_excerpt_review_is_filled(blank_excerpt_review)
+assert w.final_excerpt_review_is_filled(blank_excerpt_review, excerpt_input)
+assert w.selected_excerpt_evidence(blank_excerpt_review, excerpt_input, "aspect_evidence") == "演员表演自然，"
+invalid_index_review = dict(blank_excerpt_review, aspect_evidence_candidate_index=9)
+assert not w.final_excerpt_review_is_filled(invalid_index_review, excerpt_input)
+direct_fallback_review = dict(blank_excerpt_review)
+direct_fallback_review.pop("aspect_evidence_candidate_index")
+direct_fallback_review["aspect_evidence"] = "表演自然"
+assert w.final_excerpt_review_is_filled(direct_fallback_review, excerpt_input)
 
 conditional_template = w.final_excerpt_review_template_payload(
     "wf", [], [{
@@ -394,14 +408,14 @@ conditional_template = w.final_excerpt_review_template_payload(
 )
 conditional_input = {
     "view_id": "conditional::P01",
+    "excerpt_segments": {"1": "《测试剧》表演自然。"},
     "target_review_required": True,
     "work_consistency_review_required": True,
 }
 conditional_review = conditional_template["reviews"]["conditional::P01"]
 conditional_review.update({
-    "decision": "keep", "reason": "已核对条件项",
-    "aspect_evidence": "表演自然", "stance": "positive",
-    "stance_evidence": "表演自然", "self_contained": True,
+    "decision": "keep", "aspect_evidence_candidate_index": 1,
+    "stance": "positive", "stance_evidence_candidate_index": 1, "self_contained": True,
 })
 assert not w.final_excerpt_review_is_filled(conditional_review, conditional_input)
 conditional_review.update({

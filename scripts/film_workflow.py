@@ -93,6 +93,7 @@ STAGE_GUIDANCE = {
         "拆开检查簇标题中的每项主张，确保全部成员至少支持其中一项且每项均有成员证据",
         "正面簇只含正面片段、负面簇只含负面片段，客观簇只含事实、均衡观察或舆情分布",
         "同时检查期次范围、来源角色、过度切碎和大口袋簇；禁止为进入9至16个而机械合并或删除样本",
+        "只填写模板中的 decision、report_role、scope_type、title_claims、issues 和 reason；通过时 issues 保持空数组，不重复填写脚本已计算的数量与审计项",
     ],
     "excerpt_review": [
         "最多选择同一来源中按原顺序出现的两个逐字片段，不改写、不补字、不调换顺序",
@@ -101,6 +102,7 @@ STAGE_GUIDANCE = {
     ],
     "final_excerpt_review": [
         "审核最终清洗后展示文字本身，常规项只核对方面、局部立场和语义完整性；对象与跨作品字段仅在输入明确标记时填写",
+        "常规保留项按 excerpt_segments 编号选择方面和立场证据，不抄原文、不写保留理由；只有候选均不适用时才填写逐字证据",
         "片段可修复时先回看全文重截；归簇不当时先尝试重归簇或建立真实新簇，再考虑逐来源 drop",
         "不得用文章整体立场否定其中可独立成立的局部观点，也不得为了缩量删除合格独立表达",
     ],
@@ -111,7 +113,7 @@ STAGE_GUIDANCE = {
     "post_excerpt_count_review": [
         "只审核终审 drop 之后实际仍有展示样本的一级观点簇数量和颗粒度",
         "不要回改终审前 cluster_count，也不要为进入9至16机械合并、拆分或补造观点",
-        "按输入指纹填写实际簇数；越界时如实批准并说明继续调整会损害哪项语义质量",
+        "模板已预填输入指纹；只填写 decision、issues 和 reason，越界时补充 exception_reason，不重复填写实际簇数",
     ],
 }
 
@@ -741,7 +743,7 @@ def source_review_template_payload(workflow_id: str, inputs: list[Path], queue: 
             # candidate better supports their semantic decision.
             "evidence_candidate_index": 1 if item.get("review_evidence_candidates") else None,
         }
-        if clean(item.get("episode_review_instruction")):
+        if item.get("episode_review_required") is True:
             review.update({
                 "episode_scope": "",
                 "episode_evidence": "",
@@ -758,6 +760,7 @@ def source_review_template_payload(workflow_id: str, inputs: list[Path], queue: 
             "evidence_candidate_index": "candidate 1 is prefilled when available; keep it only if it supports the decision, otherwise choose another candidate_index",
             "exact_evidence_fallback": "use evidence or evidence_position only when no generated candidate supports the decision",
             "exact_copy_group": "review the representative once; select propagates the result to copy_group_source_ids",
+            "full_source_lookup": "候选不足时按 source_id 到 workflow_status.full_source_file 回查；输入项不重复携带回查说明",
         },
         "reviews": reviews,
     }
@@ -786,10 +789,9 @@ def final_excerpt_review_template_payload(
             continue
         reviews[view_id] = {
             "decision": "",
-            "reason": "",
-            "aspect_evidence": "",
+            "aspect_evidence_candidate_index": None,
             "stance": "",
-            "stance_evidence": "",
+            "stance_evidence_candidate_index": None,
             "self_contained": None,
         }
         if item.get("target_review_required"):
@@ -800,56 +802,69 @@ def final_excerpt_review_template_payload(
             reviews[view_id].update({
                 "short_excerpt_justified": None,
                 "short_excerpt_reason": "",
-                "specific_support_evidence": "",
+                "specific_support_evidence_candidate_index": None,
             })
         if item.get("promotion_markers"):
-            reviews[view_id].update({"independent_opinion_passed": None, "opinion_evidence": ""})
+            reviews[view_id].update({"independent_opinion_passed": None, "opinion_evidence_candidate_index": None})
     return {
         "scope": "current_period_final_excerpt_semantic_reviews",
         "_workflow": binding(workflow_id, inputs),
         "contract": {
-            "schema_version": 3,
-            "instruction": "只填写 workflow_status.input_file 中的当前分片；控制器会自动累计此前分片。常规 keep 只需 decision、reason、stance、aspect_evidence、stance_evidence、self_contained",
+            "schema_version": 4,
+            "instruction": "只填写当前分片。按 excerpt_segments 的编号选择方面与立场证据；常规 keep 不写理由、不复制原文",
             "full_source_lookup": "仅对需要重截、转簇或核对跨作品的项目按 source_id 回查 retained_sources.jsonl",
-            "evidence_scopes_are_in_contract": True,
-            "aspect_evidence": "cleaned_excerpt",
-            "stance_evidence": "cleaned_excerpt",
-            "specific_support_evidence": "cleaned_excerpt",
+            "required_for_normal_keep": ["decision=keep", "aspect_evidence_candidate_index", "stance", "stance_evidence_candidate_index", "self_contained=true"],
+            "exact_text_fallback": "候选均不适用时，才填写 aspect_evidence、stance_evidence、specific_support_evidence 或 opinion_evidence 的逐字原文",
             "script_owned": ["target when target_review_required=false", "work consistency when work_consistency_review_required=false", "length", "markup", "verbatim positions"],
-            "drop_fields": ["failed_checks", "reexcerpt_attempted", "reassignment_attempted when aspect or stance fails", "reassignment_reason", "conflict_evidence when work consistency fails"],
+            "drop_fields": ["reason", "failed_checks", "reexcerpt_attempted", "reassignment_attempted when aspect or stance fails", "reassignment_reason", "conflict_evidence when work consistency fails"],
         },
         "reviews": reviews,
     }
 
 
+def selected_excerpt_evidence(review: dict, input_item: dict, field: str) -> str:
+    direct = clean(review.get(field))
+    if direct:
+        return direct
+    index = review.get(f"{field}_candidate_index")
+    if isinstance(index, bool):
+        return ""
+    if isinstance(index, int) or (isinstance(index, str) and index.isdigit()):
+        return clean((input_item.get("excerpt_segments") or {}).get(str(index)))
+    return ""
+
+
 def final_excerpt_review_is_filled(review: dict, input_item: dict | None = None) -> bool:
     decision = clean(review.get("decision"))
-    if decision not in {"keep", "drop"} or not clean(review.get("reason")):
+    if decision not in {"keep", "drop"}:
         return False
+    input_item = input_item or {}
     if decision == "keep":
         if clean(review.get("stance")) not in {"positive", "objective", "negative"}:
             return False
         if review.get("self_contained") is not True:
             return False
-        if any(not clean(review.get(field)) for field in ("aspect_evidence", "stance_evidence")):
+        if any(not selected_excerpt_evidence(review, input_item, field) for field in ("aspect_evidence", "stance_evidence")):
             return False
-        if (input_item or {}).get("target_review_required") and (
+        if input_item.get("target_review_required") and (
             review.get("target_passed") is not True or not clean(review.get("target_evidence"))
         ):
             return False
-        if (input_item or {}).get("work_consistency_review_required") and (
+        if input_item.get("work_consistency_review_required") and (
             review.get("work_consistency_passed") is not True or not clean(review.get("work_consistency_evidence"))
         ):
             return False
-        if (input_item or {}).get("short_excerpt"):
+        if input_item.get("short_excerpt"):
             if review.get("short_excerpt_justified") is not True:
                 return False
-            if not clean(review.get("short_excerpt_reason")) or not clean(review.get("specific_support_evidence")):
+            if not clean(review.get("short_excerpt_reason")) or not selected_excerpt_evidence(review, input_item, "specific_support_evidence"):
                 return False
-        if (input_item or {}).get("promotion_markers"):
-            if review.get("independent_opinion_passed") is not True or not clean(review.get("opinion_evidence")):
+        if input_item.get("promotion_markers"):
+            if review.get("independent_opinion_passed") is not True or not selected_excerpt_evidence(review, input_item, "opinion_evidence"):
                 return False
         return True
+    if not clean(review.get("reason")):
+        return False
     failed_checks = review.get("failed_checks")
     if not isinstance(failed_checks, list) or not failed_checks or review.get("reexcerpt_attempted") is not True:
         return False
@@ -873,19 +888,12 @@ def cluster_set_review_template_payload(
             "decision": "",
             "report_role": "",
             "scope_type": "",
-            "title_claims_passed": None,
             "title_claims": [],
-            "stance_purity_passed": None,
-            "scope_purity_passed": None,
-            "scope_reason": "",
-            "granularity_passed": None,
-            "granularity_reason": "",
-            "source_role_checked": None,
-            "source_role_reason": "",
+            "issues": [],
             "reason": "",
         }
         if clean(item.get("stance")) == "objective":
-            review.update({"objective_purity_passed": None, "objective_subtype": ""})
+            review.update({"objective_subtype": ""})
         reviews[review_key] = review
     count_reviews = {}
     for item in count_input.get("batches", []):
@@ -895,21 +903,17 @@ def cluster_set_review_template_payload(
         count_reviews[review_key] = {
             "fingerprint": clean(item.get("fingerprint")),
             "decision": "",
-            "cluster_count": item.get("cluster_count"),
-            "range_status": clean(item.get("expected_range_status")),
-            "reader_load_reviewed": None,
-            "overfragmentation_checked": None,
-            "overbreadth_checked": None,
-            "no_forced_merge_or_split": None,
-            "exception_approved": None,
-            "exception_reason": "",
+            "issues": [],
             "reason": "",
         }
+        if clean(item.get("expected_range_status")) != "within_range":
+            count_reviews[review_key]["exception_reason"] = ""
     return {
         "scope": "current_period_cluster_set_reviews",
         "_workflow": binding(workflow_id, inputs),
         "contract": {
-            "cluster_review": "按代表样本检查簇标题、立场、范围和颗粒度；每个标题分句至少列一个 supporting_source_id",
+            "cluster_review": "按代表样本检查簇标题、立场、范围、来源角色和颗粒度；通过时 issues 保持空数组，每个标题分句至少列一个 supporting_source_id",
+            "count_review": "脚本已经计算簇数和范围；AI只判断是否过碎、过宽或被机械调数，通过时 issues 保持空数组",
             "per_member_review": "逐样本语义对齐统一在 final_excerpt_review 完成，此处不复制全部成员证据",
         },
         "reviews": reviews,
@@ -921,13 +925,42 @@ def cluster_set_review_is_filled(item: dict) -> bool:
     return (
         clean(item.get("decision")) == "pass"
         and bool(clean(item.get("reason")))
+        and item.get("issues") == []
         and isinstance(item.get("title_claims"), list)
         and bool(item.get("title_claims"))
     )
 
 
 def cluster_count_review_is_filled(item: dict) -> bool:
-    return clean(item.get("decision")) == "pass" and bool(clean(item.get("reason")))
+    return clean(item.get("decision")) == "pass" and bool(clean(item.get("reason"))) and item.get("issues") == []
+
+
+def post_excerpt_count_review_template_payload(workflow_id: str, input_path: Path) -> dict:
+    payload = read_json(input_path)
+    reviews = {}
+    for item in payload.get("batches", []):
+        review_key = clean(item.get("review_key"))
+        if not review_key:
+            continue
+        review = {
+            "fingerprint": clean(item.get("fingerprint")),
+            "decision": "",
+            "issues": [],
+            "reason": "",
+        }
+        if clean(item.get("expected_range_status")) != "within_range":
+            review["exception_reason"] = ""
+        reviews[review_key] = review
+    return {
+        "scope": "current_period_post_excerpt_cluster_count_reviews",
+        "_workflow": binding(workflow_id, [input_path]),
+        "contract": {
+            "instruction": "脚本已经计算终审后的簇数和范围；只判断是否过碎、过宽或被机械调数，通过时 issues 保持空数组",
+            "required": ["fingerprint", "decision=pass", "issues=[]", "reason"],
+            "out_of_range_extra": ["exception_reason"],
+        },
+        "reviews": reviews,
+    }
 
 
 def stage_fresh(manifest: dict, stage: str, token: str, required: Iterable[Path] = ()) -> bool:
@@ -1086,6 +1119,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
                 input_file=str(current_input), source_chunk_file=str(next_chunk or source_inputs[0]),
                 chunk_index=chunk_index, chunk_total=chunk_total,
                 full_input_file=str(source_inputs[0]),
+                full_source_file=str(p["run"] / "normalized_sources.jsonl"),
                 binding_issue=issue, required=len(required_ids), completed=len(required_ids & completed_ids), missing=len(missing),
             )
         write_json(p["source"], source_ledger)
@@ -1419,7 +1453,6 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             full_input_file=str(semantic_inputs[0]), contract_file=str(semantic_inputs[1]),
             full_source_file=str(p["run"] / "retained_sources.jsonl"), binding_issue=semantic_issue,
             required=len(required_views), completed=len(required_views & semantic_done), missing=len(required_views - semantic_done),
-            incomplete_view_ids=sorted(required_views - semantic_done)[:50],
         )
     write_json(p["semantic"], semantic_ledger)
 
@@ -1431,11 +1464,8 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         ) if post_count_input.exists() else "missing_post_excerpt_count_input"
         if post_count_issue:
             template = p["templates"] / "post_excerpt_cluster_count_reviews.template.json"
-            ensure_template(template, {
-                "scope": "current_period_post_excerpt_cluster_count_reviews",
-                "_workflow": binding(workflow_id, [post_count_input]) if post_count_input.exists() else {},
-                "reviews": {},
-            })
+            if post_count_input.exists():
+                write_json(template, post_excerpt_count_review_template_payload(workflow_id, post_count_input))
             return result(
                 "REVIEW_REQUIRED", "post_excerpt_count_review",
                 "后置簇数复核与当前终审结果不一致",
@@ -1460,16 +1490,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         failures = read_json(p["run"] / "render_failures.json").get("failures", []) if (p["run"] / "render_failures.json").exists() else []
         if clean(render_summary.get("stage")) == "post_excerpt_cluster_count_review" and post_count_input.exists():
             template = p["templates"] / "post_excerpt_cluster_count_reviews.template.json"
-            template_payload = {
-                "scope": "current_period_post_excerpt_cluster_count_reviews",
-                "_workflow": binding(workflow_id, [post_count_input]),
-                "contract": {
-                    "required": ["fingerprint", "decision=pass", "cluster_count", "range_status", "reader_load_reviewed=true", "no_forced_merge_or_split=true", "reason"],
-                    "out_of_range_extra": ["exception_approved=true", "exception_reason"],
-                },
-                "reviews": {},
-            }
-            ensure_template(template, template_payload)
+            write_json(template, post_excerpt_count_review_template_payload(workflow_id, post_count_input))
             return result(
                 "REVIEW_REQUIRED", "post_excerpt_count_review",
                 "终审改变了实际非空观点簇数，请按终审后结果完成一次后置数量复核",

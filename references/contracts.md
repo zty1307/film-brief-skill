@@ -88,7 +88,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须填写当前来源专属的 `reason` 和证据。控制器每轮在 `input_file` 中提供下一批不超过60条且不超过约120KB的 `source_review_chunks/chunk-*.jsonl`；当前模板只含这一片待审项，提交后由脚本账本自动累计，重新运行 `advance` 后再接收下一片。每条提供逐字候选、判断所需元数据和全文回查指针，不重复整篇正文与脚本中间量。优先填写 `evidence_candidate_index`；脚本会自动还原逐字原文及 `[start,end]`。候选均不能支撑实际决定时，才按 `full_source_lookup` 回查全文并填写连续逐字 `evidence` 或 `evidence_position`。`exclude` 的证据应直接支撑跨剧、无观点、纯推广或期次不符等理由。控制器会在链接检查之前生成 `source_review_validation.json`，一次列出全部缺失、越界或字段错误。证据格式错误时修正证据字段，不得为了绕过校验改变正确的语义决定。低于 `quality_floor` 但已经具备“目标对象 + 评价判断 + 支撑依据”的来源进入 `retain_consensus`，质量分只影响排序。
+`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须填写当前来源专属的 `reason` 和证据。控制器每轮提供下一批不超过60条且不超过约120KB的精简记录；分片不重复整篇正文、统一回查说明、质量中间量或候选命中词。优先填写 `evidence_candidate_index`，脚本自动还原逐字原文及位置；候选均不适用时，才按 `workflow_status.full_source_file` 和 `source_id` 回查全文并填写 `evidence` 或 `evidence_position`。提交由脚本账本累计，执行模型不复制历史答案。
 
 ## 同稿审计
 
@@ -132,20 +132,13 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
       "decision": "pass",
       "report_role": "report_point",
       "scope_type": "current_broadcast_reaction",
-      "title_claims_passed": true,
       "title_claims": [
         {
           "claim": "演员表演自然生活化",
           "supporting_source_ids": ["来源ID一", "来源ID二"]
         }
       ],
-      "stance_purity_passed": true,
-      "scope_purity_passed": true,
-      "scope_reason": "均为播出后对当前剧情的评价",
-      "granularity_passed": true,
-      "granularity_reason": "共同评价机制为生活化表演，人物仅作论据",
-      "source_role_checked": true,
-      "source_role_reason": "含独立媒体和网民表达，节目方内容仅作背景",
+      "issues": [],
       "reason": "标题各项均有簇内证据，所有成员共同支持同一报告体观点"
     }
   },
@@ -153,13 +146,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
     "剧名 第一期": {
       "fingerprint": "从 cluster_count_review_input.json 原样复制",
       "decision": "pass",
-      "cluster_count": 11,
-      "range_status": "within_range",
-      "reader_load_reviewed": true,
-      "overfragmentation_checked": true,
-      "overbreadth_checked": true,
-      "no_forced_merge_or_split": true,
-      "exception_approved": false,
+      "issues": [],
       "reason": "已检查过度切碎和大口袋簇，11个观点均有独立评价机制且阅读量适中"
     }
   }
@@ -168,9 +155,9 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 
 第一次运行 `cluster` 后生成 `cluster_set_review_input.json`。审查键固定为“批次名 + 制表符 + 簇ID”，`fingerprint` 必须逐字复制本次输入；标题、立场或成员来源变化都会令旧审查失效。每个非空簇必须覆盖。`report_role` 仅允许 `report_point`、`subtopic`、`data_note`、`rare_signal`；`data_note` 必须使用 `objective` 立场。角色只帮助人工理解观点在报告中的用途，不形成页面层级，也不影响来源去留。
 
-`cluster_set_review_input.json` 每簇最多给出8条代表样本，完整成员ID仍进入 `fingerprint`。`title_claims` 要把簇标题中的并列判断拆开，每项至少列出一个实际簇内来源ID。集合复核确认共享评价机制、立场、范围、来源角色和颗粒度；它不再要求复制全部成员的逐条证据。逐样本的对象、方面、立场、作品一致性和自足性统一在 `final_excerpt_semantic_reviews.json` 中完成。电视剧的 `scope_type` 取 `pre_broadcast_expectation`、`current_broadcast_reaction`、`later_reputation`、`mixed_time_explicit`；综艺取 `latest_episode`、`previous_episode_prominent`、`program_level_current`、`mixed_scope_explicit`。客观簇还须填写 `objective_purity_passed:true` 和合法 `objective_subtype`。任何项未通过时先修改簇定义或成员归属，再重新生成指纹。
+`cluster_set_review_input.json` 每簇最多给出8条代表样本，完整成员ID仍进入 `fingerprint`。`title_claims` 把簇标题中的并列判断拆开，每项至少列出一个实际簇内来源ID。`decision:"pass"` 与空 `issues` 表示已经综合检查标题、立场、范围、来源角色和颗粒度，不再分别填写多组同义布尔值和原因。电视剧的 `scope_type` 取 `pre_broadcast_expectation`、`current_broadcast_reaction`、`later_reputation`、`mixed_time_explicit`；综艺取 `latest_episode`、`previous_episode_prominent`、`program_level_current`、`mixed_scope_explicit`。客观簇另填合法 `objective_subtype`。
 
-`count_reviews` 是页面生成前的整期簇数审查。脚本从全部非空最终簇、簇名、立场和成员计算批次指纹。普通单期9—16个簇时使用 `within_range`；低于9个或高于16个时分别使用 `below_range`、`above_range`，并设置 `exception_approved:true` 和不少于12个规范化字符的 `exception_reason`，具体说明为何继续拆分或合并会损害语义质量。每期都必须确认已经检查过度切碎、过度宽泛和机械调数。该审查不改变成员，也不能代替逐簇证据审查；脚本不会为了达标自动调整观点。`cluster_count_review_queue.unresolved.jsonl` 非空时，`render` 和 `verify` 均不得发布。
+`count_reviews` 是页面生成前的整期簇数审查。脚本计算指纹、实际簇数和9—16范围状态；AI只填写 `decision`、`issues` 和综合理由，不再抄写这些确定数据。范围外另填 `exception_reason`，说明继续拆分或合并为何损害语义质量。脚本不会为了达标自动调整观点。
 
 ## `cluster_overrides.json`
 
@@ -244,23 +231,22 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
   "reviews": {
     "来源ID::簇ID": {
       "decision": "keep",
-      "aspect_evidence": "最终摘录中的评价方面原文",
+      "aspect_evidence_candidate_index": 1,
       "stance": "positive",
-      "stance_evidence": "最终摘录中的明确判断原文",
-      "self_contained": true,
-      "reason": "摘录独立支持本簇，未混入相反立场"
+      "stance_evidence_candidate_index": 2,
+      "self_contained": true
     }
   }
 }
 ```
 
-该文件只审核最终展示文字，不得复制归簇阶段的 `passage_stance` 作为结论。控制器每轮在 `input_file` 中给出下一批最多60条的 `final_excerpt_review_chunks/chunk-*.jsonl`；当前模板只含这一片待审项，提交后由脚本账本自动累计。每条只含清洁摘录、必要时才出现的不同后台原文、摘录前后各最多60字上下文及必要元数据，完整来源仅在需要重截、转簇或核对跨作品时按 `source_id` 到 `retained_sources.jsonl` 回查。`raw_excerpt` 省略时表示它与 `cleaned_excerpt` 完全相同。
+该文件只审核最终展示文字。控制器每轮给出下一批最多60条；每条将清洁摘录无损拆成按顺序编号的 `excerpt_segments`，按编号顺序阅读即是完整展示文字。后台原文只在对象或跨作品风险需要时出现，完整来源只在需要重截、转簇或核对时按 `source_id` 回查。
 
-普通 `keep` 只填 `decision`、`reason`、`aspect_evidence`、`stance`、`stance_evidence` 和 `self_contained`。脚本已经核对作品锚点、跨作品词、长度、标记清洁和逐字位置；仅当输入明确给出 `target_review_required:true` 或 `work_consistency_review_required:true` 时，模板才出现相应的通过值与逐字证据字段。短摘录和促销标记也只在脚本触发时增加条件字段。`aspect_evidence`、`stance_evidence`、`specific_support_evidence` 必须是 `cleaned_excerpt` 的逐字子串；条件性的 `target_evidence`、`work_consistency_evidence` 必须是后台原文的逐字子串。
+普通 `keep` 只填决定、方面证据编号、立场、立场证据编号和 `self_contained:true`，无需填写理由或复制原文。脚本按编号回填逐字证据；候选均不适用时才可填写不带 `_candidate_index` 的逐字原文字段。短摘录的具体依据和促销内容中的独立观点也优先选择编号。对象或跨作品条件项仍只在脚本明确标记时出现。
 
-清洁后的摘录优先为70—150字；超过150字禁止保留，短于70字时必须先回看全文，仍无法补足同观点依据才填写短摘录例外及逐字具体依据。作品标签、人物名及“好看、封神、绝了、笑点拉满、期待”等泛泛态度不算具体依据。全文中没有可替换合格片段时使用 `decision:"drop"`，列明 `failed_checks` 并确认已经尝试重截；方面或立场失败还须尝试重新归簇，作品冲突须给全文逐字冲突证据。已审 `drop` 写入拒绝审计并从工作台省略；缺少结构化失败项、决定、理由或 keep 所需证据会阻止发布。终审不设每簇样本数量规则。`verify` 会再次核对语义复核、字符位置、边界和同来源片段重叠情况。
+清洁后的摘录优先为70—150字。短于70字时先回看全文，仍无法补足才填写短摘录例外和具体依据编号。作品标签、人物名及“好看、封神、绝了、笑点拉满、期待”等泛泛态度不算具体依据。全文中没有可替换合格片段时使用 `decision:"drop"`，此时才填写具体理由、`failed_checks` 和重截或转簇记录。终审不设每簇样本数量规则。
 
-若终审 drop 使实际非空簇数变化，控制器要求 `post_excerpt_cluster_count_reviews.json`。每批次以 `post_excerpt_cluster_count_review_input.json` 中的 `fingerprint` 为准，填写 `decision:"pass"`、实际 `cluster_count`、`range_status`、`reader_load_reviewed:true`、`no_forced_merge_or_split:true` 和具体 `reason`；9—16以外另填 `exception_approved:true` 与具体 `exception_reason`。该文件只审核终审后实际结果，不修改终审前的 `count_reviews`。
+若终审 drop 使实际非空簇数变化，控制器要求 `post_excerpt_cluster_count_reviews.json`。模板已预填当前指纹；AI只填写 `decision:"pass"`、空 `issues` 和具体理由，9—16以外另填 `exception_reason`。实际簇数与范围由脚本计算，不要求AI重复填写。
 
 ## `*.merge-verification.json`
 
