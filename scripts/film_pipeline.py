@@ -573,6 +573,15 @@ def parse_datetime(value: object) -> datetime | None:
     return None
 
 
+def parse_period_boundary(value: object, *, end: bool = False) -> datetime | None:
+    """Parse an explicit period boundary, treating a date-only end as inclusive."""
+    text = clean(value)
+    parsed = parse_datetime(text)
+    if parsed and end and re.fullmatch(r"\d{4}[-/]\d{2}[-/]\d{2}", text):
+        return parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return parsed
+
+
 def filename_period(name: str) -> tuple[datetime | None, datetime | None]:
     match = re.search(r"(\d{4}\.\d{2}\.\d{2}) (\d{2})_(\d{2})至(\d{4}\.\d{2}\.\d{2}) (\d{2})_(\d{2})", name)
     if match:
@@ -592,8 +601,8 @@ def filename_period(name: str) -> tuple[datetime | None, datetime | None]:
 def period_state(row: dict, config: dict) -> tuple[str, str]:
     batch_window = config.get("period_windows", {}).get(row["batch"], {})
     if batch_window:
-        start = parse_datetime(batch_window.get("start"))
-        end = parse_datetime(batch_window.get("end"))
+        start = parse_period_boundary(batch_window.get("start"))
+        end = parse_period_boundary(batch_window.get("end"), end=True)
     else:
         start, end = filename_period(row.get("source_file", ""))
     moment = parse_datetime(row.get("published"))

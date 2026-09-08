@@ -37,7 +37,7 @@
 }
 ```
 
-批次名称与原始数据子目录一致。`strong_terms` 只写能够独立确认目标作品的全名、完整节目名、官方专属话题，或从当期标题和话题标签实际确认的唯一简称；`weak_terms` 写可能泛指题材或其他内容的简称，只能触发语义复核；`auxiliary_terms` 写演员、嘉宾、主创和角色名，只辅助理解，不独立触发准入；`comparison_terms` 记录同期文章中容易混入的其他作品。旧版 `terms/regex` 已停用，防止人物名单或泛称被无意当成强锚点。若导出文件名自带“起始时间至结束时间”，脚本会据此判定期内；否则必须填写 `period_windows`。只有确认输入本身已经严格限定期次时，才可设置 `assume_all_in_period: true`。
+批次名称与原始数据子目录一致。`strong_terms` 只写能够独立确认目标作品的全名、完整节目名、官方专属话题，或从当期标题和话题标签实际确认的唯一简称；`weak_terms` 写可能泛指题材或其他内容的简称，只能触发语义复核；`auxiliary_terms` 写演员、嘉宾、主创和角色名，只辅助理解，不独立触发准入；`comparison_terms` 记录同期文章中容易混入的其他作品。旧版 `terms/regex` 已停用，防止人物名单或泛称被无意当成强锚点。若导出文件名自带“起始时间至结束时间”，脚本会据此判定期内；否则必须填写 `period_windows`。日期型 `end`（如 `2025-09-11`）按该日23:59:59处理，包含结束日全天；需要更精确口径时填写完整时间。只有确认输入本身已经严格限定期次时，才可设置 `assume_all_in_period: true`。
 
 `content_mode` 仅允许 `serial_drama` 或 `episodic_variety`。电视剧使用前者；周更综艺使用后者，并要求来源全文复核补充 `episode_scope`、`episode_evidence`。`episode_scope` 取值为 `latest_episode`、`previous_episode_prominent`、`program_level_current`、`out_of_scope`；前一期突出话题还必须填写 `prominence_basis`。
 

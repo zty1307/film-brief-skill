@@ -30,6 +30,20 @@ start, end = p.filename_period("测试剧3-2025.09.24至2025.09.26-微博最热�
 assert start.isoformat() == "2025-09-24T00:00:00"
 assert end.isoformat() == "2025-09-26T23:59:59"
 
+# A date-only configured end includes that entire calendar day.  Previously it
+# became 00:00 and silently discarded almost every record on the report date.
+period_config = {
+    "period_windows": {"测试剧": {"start": "2025-09-09", "end": "2025-09-11"}},
+}
+assert p.period_state(
+    {"batch": "测试剧", "published": "2025-09-11 20:15:00", "source_file": ""},
+    period_config,
+)[0] == "in_period"
+assert p.period_state(
+    {"batch": "测试剧", "published": "2025-09-12 00:00:00", "source_file": ""},
+    period_config,
+)[0] == "out_of_period"
+
 
 # Anchor terms supplied after full-text review must control passage selection.
 row = {
