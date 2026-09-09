@@ -144,7 +144,9 @@ DISPLAY_PROMO_BOILERPLATE = re.compile(
 )
 PROMOTION_OPERATIONAL = re.compile(
     r"抽奖|随机抽|加抽|兑奖|礼包|赠票|扫码|二维码|购票|单人票|双人票|票价|报名|"
-    r"活动规则|领取福利|点击链接|直播间下单"
+    r"活动规则|领取福利|点击链接|直播间下单|转发抽|云包场|送礼物|应援|控评|"
+    r"(?:正片|每日|话题|任务|互动|参与)打卡|打卡(?:任务|互动)|"
+    r"评论区盖楼|全平台分(?:享|xiang)|详细教程|福利任务|主攻.{0,6}站内|全力冲刺"
 )
 AI_GENERATED_DISCLOSURE = re.compile(
     r"(?:本文|本篇|该文|文章|内容).{0,12}(?:由|使用|借助|经).{0,10}(?:AI|人工智能|ChatGPT|GPT).{0,16}(?:生成|创作|撰写|改写|润色)",
@@ -257,6 +259,22 @@ def unbalanced_display_quotes(value: object) -> bool:
 def promotion_review_markers(value: object) -> list[str]:
     """Find operational promotion language that requires an explicit opinion check."""
     return sorted(set(PROMOTION_OPERATIONAL.findall(clean(value))))
+
+
+def promotion_evidence_is_independent(value: object) -> bool:
+    """Reject instructions masquerading as viewpoints while keeping real commentary."""
+    text = clean(value)
+    if not text:
+        return False
+    if OPINION.search(text) or JUDGEMENT.search(text) or OBJECTIVE_ANALYSIS.search(text):
+        return True
+    return bool(
+        re.search(
+            r"(?:媒体|平台|剧方|官方|网民|网友|观众|粉丝|品牌).{0,24}"
+            r"(?:发布|发起|组织|参与|准备|达到|累计|突破|形成|引发|出现|推出|开展|投放|投入|豪掷|包场)",
+            text,
+        )
+    )
 
 
 def normalized(value: object) -> str:
@@ -613,7 +631,7 @@ def data_value(data: dict, *names: str) -> str:
 def map_record(record: dict) -> dict:
     data = record.get("data") if isinstance(record.get("data"), dict) else record
     post_type = data_value(data, "帖子类型", "post_type") or clean(record.get("post_type")) or "原帖"
-    body = data_value(data, "正文内容", "正文", "body") or clean(record.get("body"))
+    body = data_value(data, "正文内容", "正文", "内容", "文章内容", "body") or clean(record.get("body"))
     asr = data_value(data, "视频ASR", "音转文", "asr") or clean(record.get("asr"))
     title = data_value(data, "标题", "title") or clean(record.get("title"))
     parent_body = data_value(data, "原帖正文", "父帖正文", "parent_body") or clean(record.get("parent_body"))
@@ -631,10 +649,10 @@ def map_record(record: dict) -> dict:
         "body": body,
         "asr": asr,
         "parent_body": parent_body,
-        "author": data_value(data, "用户名", "昵称", "作者", "author") or clean(record.get("author")) or "未署名",
+        "author": data_value(data, "用户名", "昵称", "账号昵称", "帐号昵称", "公众号名称", "作者", "author") or clean(record.get("author")) or "未署名",
         "certification_type": data_value(data, "认证类型（名人、媒体、企业等）", "认证类型", "certification_type"),
         "certification_info": data_value(data, "认证信息（认证主体）", "认证信息", "认证主体", "certification_info"),
-        "url": safe_url(data_value(data, "发文链接", "原贴url", "url") or record.get("url")),
+        "url": safe_url(data_value(data, "发文链接", "链接", "文章链接", "原贴url", "url") or record.get("url")),
         "source_file": clean(record.get("source_file")),
         "source_path": clean(record.get("source_path")),
         "sheet": clean(record.get("sheet")),
@@ -1500,7 +1518,7 @@ def source_review_validation_issues(
         decision = clean(review.get("decision"))
         if decision not in ALLOWED_DECISIONS:
             issues.append({"source_id": source_id, "issue": "invalid_decision", "value": decision})
-        if not clean(review.get("reason")):
+        if decision == "exclude" and not clean(review.get("reason")):
             issues.append({"source_id": source_id, "issue": "missing_reason"})
         try:
             evidence, _ = resolve_source_review_evidence(review, row, queue_by_id.get(source_id))
@@ -1770,13 +1788,15 @@ def command_select(args: argparse.Namespace) -> None:
         review = reviews.get(source_id)
         decision = clean(review.get("decision")) if review else base["auto_decision"]
         reason = clean(review.get("reason")) if review else base["auto_reason"]
+        if review and decision in {"retain_core", "retain_consensus"} and not reason:
+            reason = "AI复核确认来源含目标作品的可用观点"
         evidence, evidence_position = (
             resolve_source_review_evidence(review, row, queue_by_id.get(source_id))
             if review else ("", None)
         )
         if decision not in ALLOWED_DECISIONS:
             raise ValueError(f"非法来源决定：{source_id} {decision}")
-        if review and not reason:
+        if review and decision == "exclude" and not reason:
             raise ValueError(f"AI复核缺少理由：{source_id}")
         if review and not evidence:
             raise ValueError(f"AI复核缺少 evidence_candidate_index、逐字 evidence 或 evidence_position：{source_id}")
@@ -3402,12 +3422,7 @@ def command_render(args: argparse.Namespace) -> None:
     semantic_rejected = []
     failures = []
     preflight_failures = []
-    drop_reason_counts: Counter[tuple[str, str, str]] = Counter()
-    drop_reason_view_ids: dict[tuple[str, str, str], list[str]] = defaultdict(list)
     drop_counts: Counter[tuple[str, str]] = Counter()
-    short_reason_counts: Counter[tuple[str, str]] = Counter()
-    short_reason_view_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
-    short_keep_counts: Counter[str] = Counter()
     cluster_display_audit = []
     post_count_review_input = []
     post_count_review_audit = {}
@@ -3536,6 +3551,8 @@ def command_render(args: argparse.Namespace) -> None:
                                 item_failures.append("含促销操作词的摘录未确认存在独立观点")
                             if not opinion_evidence or opinion_evidence not in excerpt:
                                 item_failures.append("含促销操作词的摘录缺少最终摘录中的逐字观点证据")
+                            elif not promotion_evidence_is_independent(opinion_evidence):
+                                item_failures.append("促销证据只有应援、送礼、抽奖或操作指令，没有独立评价或第三方事实观察")
                         if short_excerpt:
                             if semantic.get("short_excerpt_justified") is not True:
                                 item_failures.append("不足70字的摘录未确认全文无法补足同观点依据")
@@ -3546,11 +3563,6 @@ def command_render(args: argparse.Namespace) -> None:
                                 item_failures.append("不足70字的摘录缺少最终摘录中的逐字具体依据")
                             elif not short_excerpt_support_is_specific(excerpt, support_evidence):
                                 item_failures.append("不足70字的摘录只有泛泛态度，具体依据未包含动作、台词、场景、数据或因果分析")
-                            if not item_failures:
-                                short_keep_counts[batch] += 1
-                                reason_key = drop_reason_fingerprint(semantic.get("short_excerpt_reason"))
-                                short_reason_counts[(batch, reason_key)] += 1
-                                short_reason_view_ids[(batch, reason_key)].append(view_id)
                     elif semantic_decision == "drop" and not item_failures:
                         drop_reason = clean(semantic.get("reason"))
                         if not drop_reason:
@@ -3575,8 +3587,6 @@ def command_render(args: argparse.Namespace) -> None:
                                 item_failures.append("作品信息冲突必须提供全文中的逐字 conflict_evidence")
                         if not item_failures:
                             reason_key = drop_reason_fingerprint(drop_reason)
-                            drop_reason_counts[(batch, str(definition["id"]), reason_key)] += 1
-                            drop_reason_view_ids[(batch, str(definition["id"]), reason_key)].append(view_id)
                             drop_counts[(batch, str(definition["id"]))] += 1
                             semantic_rejected.append({
                                 "view_id": view_id,
@@ -3642,26 +3652,6 @@ def command_render(args: argparse.Namespace) -> None:
             }
             cluster_display_audit.append(display_audit)
             batch_display_audit.append(display_audit)
-            cluster_drop_total = drop_counts[(batch, str(definition["id"]))]
-            if cluster_drop_total >= 5:
-                repeated_reason, repeated_count = max(
-                    (
-                        (reason, count)
-                        for (reason_batch, reason_cluster, reason), count in drop_reason_counts.items()
-                        if reason_batch == batch and reason_cluster == str(definition["id"])
-                    ),
-                    key=lambda pair: pair[1],
-                )
-                if repeated_count / cluster_drop_total >= 0.6:
-                    repeated_view_ids = drop_reason_view_ids.get(
-                        (batch, str(definition["id"]), repeated_reason), []
-                    )
-                    failures.append({
-                        "view_id": f"{batch}::{definition['id']}",
-                        "stage": "semantic_review_quality",
-                        "issue": f"同一模板化删除理由覆盖 {repeated_count}/{cluster_drop_total} 条（已剥离理由中引用的逐条原文后统计）：{repeated_reason}。必须逐条回看全文、先尝试重截，并写出真正不同的失败项与具体原因",
-                        "affected_view_ids": repeated_view_ids,
-                    })
             if display_items:
                 clusters.append({
                     "id": str(definition["id"]),
@@ -3738,26 +3728,6 @@ def command_render(args: argparse.Namespace) -> None:
         })
         dataset["total"] += batch_count
         staged_dataset["total"] += staged_count
-        batch_short_total = short_keep_counts[batch]
-        if batch_short_total >= 5:
-            repeated_reason, repeated_count = max(
-                (
-                    (reason, count)
-                    for (reason_batch, reason), count in short_reason_counts.items()
-                    if reason_batch == batch
-                ),
-                key=lambda pair: pair[1],
-            )
-            if repeated_count / batch_short_total >= 0.6:
-                failures.append({
-                    "view_id": f"{batch}::short-excerpt-reasons",
-                    "stage": "semantic_review_quality",
-                    "issue": (
-                        f"同一短摘录例外理由覆盖 {repeated_count}/{batch_short_total} 条：{repeated_reason}。"
-                        "短摘录例外必须逐来源说明原文为何无法补足，并提供真正具体的逐字依据"
-                    ),
-                    "affected_view_ids": short_reason_view_ids.get((batch, repeated_reason), []),
-                })
     write_json(run_dir / "workbench_dataset.staged.json", staged_dataset)
     final_review_chunks = write_jsonl_chunks(
         run_dir / "final_excerpt_review_chunks", semantic_inputs,

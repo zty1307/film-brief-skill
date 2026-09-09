@@ -27,6 +27,34 @@ p = load("film_pipeline_regression", PIPELINE_PATH)
 w = load("film_workflow_regression", WORKFLOW_PATH)
 
 
+# Public-account exports use a shorter schema than monitoring-system exports.
+# Losing these aliases silently erased every article body, author and URL in a
+# real run, leaving clustering to work from titles alone.
+public_record = {
+    "id": "public-1", "batch": "测试剧", "channel": "公众文章",
+    "source_file": "公众文章最热样本.xlsx", "source_path": "x.xlsx", "sheet": "最热公号文章", "row": 2,
+    "data": {
+        "发表时间": "2025-09-11 12:00:00", "标题": "《测试剧》获得关注",
+        "内容": "《测试剧》的实景和服化道很有质感，人物表演也自然可信。",
+        "链接": "https://mp.weixin.qq.com/s/example", "账号昵称": "测试公号",
+        "认证类型": "媒体", "认证信息": "测试媒体",
+    },
+}
+mapped_public = p.map_record(public_record)
+assert mapped_public["body"] == public_record["data"]["内容"]
+assert mapped_public["author"] == "测试公号"
+assert mapped_public["url"] == public_record["data"]["链接"]
+
+# Pure fan-operation instructions cannot pass the final promotion gate merely
+# because a model marks the entire excerpt as an "independent opinion".
+assert not p.promotion_evidence_is_independent(
+    "果果们今晚全力冲刺，主攻站内，全平台分享，送礼物，评论区盖楼，详细教程见链接。"
+)
+assert p.promotion_evidence_is_independent(
+    "平台数据显示预约量突破一千万，粉丝应援规模也引发媒体关注。"
+)
+
+
 # Date-only export names are common and should not require period_windows.
 start, end = p.filename_period("测试剧3-2025.09.24至2025.09.26-微博最热样本.xlsx")
 assert start.isoformat() == "2025-09-24T00:00:00"
@@ -178,6 +206,12 @@ assert not p.source_review_validation_issues(
     {"a": sources["a"]}, candidate_queue, {"a": candidate_review},
     {"targets": {"测试": {"content_mode": "serial_drama"}}},
 )
+retain_without_reason = dict(candidate_review, decision="retain_consensus", reason="")
+assert not p.source_review_validation_issues(
+    {"a": sources["a"]}, candidate_queue, {"a": retain_without_reason},
+    {"targets": {"测试": {"content_mode": "serial_drama"}}},
+)
+assert w.source_review_is_filled(retain_without_reason)
 resolved, resolved_position = p.resolve_source_review_evidence(
     candidate_review, sources["a"], candidate_queue[0]
 )
@@ -428,6 +462,35 @@ conditional_review.update({
     "work_consistency_passed": True, "work_consistency_evidence": "《测试剧》",
 })
 assert w.final_excerpt_review_is_filled(conditional_review, conditional_input)
+
+# Deterministic semantic mistakes are rejected in the current chunk instead of
+# accumulating until a large render-repair loop at the end of the run.
+strict_input = {
+    "view_id": "strict::O01", "review_fingerprint": "fp-3",
+    "cluster_stance": "objective",
+    "excerpt_segments": {"1": "平台数据显示预约量突破一千万。"},
+}
+strict_review = {
+    "review_fingerprint": "fp-3", "decision": "keep",
+    "aspect_evidence_candidate_index": 1, "stance": "objective",
+    "stance_evidence_candidate_index": 1, "self_contained": True,
+}
+assert not w.final_excerpt_review_is_filled(strict_review, strict_input), "客观簇立场证据含明显褒义词时应在当前分片返修"
+strict_input["excerpt_segments"] = {"1": "平台数据显示预约量达到一千万。"}
+assert w.final_excerpt_review_is_filled(strict_review, strict_input)
+
+promo_input = {
+    "view_id": "promo::O01", "review_fingerprint": "fp-4",
+    "cluster_stance": "objective", "promotion_markers": ["全力冲刺"],
+    "excerpt_segments": {"1": "果果们今晚全力冲刺，主攻站内，送礼物，评论区盖楼。"},
+}
+promo_review = {
+    "review_fingerprint": "fp-4", "decision": "keep",
+    "aspect_evidence_candidate_index": 1, "stance": "objective",
+    "stance_evidence_candidate_index": 1, "self_contained": True,
+    "independent_opinion_passed": True, "opinion_evidence_candidate_index": 1,
+}
+assert not w.final_excerpt_review_is_filled(promo_review, promo_input)
 
 # Short-excerpt exceptions need concrete support, not a generic praise line.
 assert not p.short_excerpt_support_is_specific("《赴山海》打戏太好看了！", "打戏太好看了")

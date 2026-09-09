@@ -27,6 +27,7 @@ MEDIA_REGISTRY = SKILL_ROOT / "assets" / "media_subject_registry.json"
 MANIFEST_NAME = "workflow_manifest.json"
 STATUS_NAME = "workflow_status.json"
 LOCK_NAME = "workflow.lock"
+_PIPELINE_API = None
 
 
 REVIEW_FILES = {
@@ -67,7 +68,7 @@ STAGE_GUIDANCE = {
     ],
     "source_review": [
         "逐条阅读分片中的逐字候选和必要父帖上下文；只有候选不足以判断时才按 source_id 回查完整来源",
-        "retain 与 exclude 都必须填写具体理由；优先填写 evidence_candidate_index 选择脚本候选，候选均不适用时再提供逐字 evidence 或 evidence_position",
+        "retain 只需决定和逐字证据；exclude 另填简短具体理由。优先填写 evidence_candidate_index，候选均不适用时再提供逐字 evidence 或 evidence_position",
         "证据格式错误时只修证据字段，不得为了通过校验把 retain 改成 exclude",
         "相同观点的独立作者均可保留；综艺还须核对最新一期、前一期当周突出话题或节目级讨论",
     ],
@@ -802,7 +803,8 @@ def source_review_template_payload(workflow_id: str, inputs: list[Path], queue: 
         "contract": {
             "instruction": "只填写 workflow_status.input_file 中的当前分片；控制器会自动累计此前分片",
             "allowed_decisions": ["retain_core", "retain_consensus", "exclude"],
-            "required_for_every_decision": ["source_id", "decision", "reason", "evidence_candidate_index_or_exact_evidence"],
+            "required_for_retain": ["source_id", "decision", "evidence_candidate_index_or_exact_evidence"],
+            "required_for_exclude": ["source_id", "decision", "reason", "evidence_candidate_index_or_exact_evidence"],
             "evidence_candidate_index": "candidate 1 is prefilled when available; keep it only if it supports the decision, otherwise choose another candidate_index",
             "exact_evidence_fallback": "use evidence or evidence_position only when no generated candidate supports the decision",
             "exact_copy_group": "review the representative once; select propagates the result to copy_group_source_ids",
@@ -820,7 +822,7 @@ def source_review_is_filled(item: dict) -> bool:
     ) or bool(clean(item.get("evidence"))) or isinstance(item.get("evidence_position"), list)
     return (
         clean(item.get("decision")) in {"retain_core", "retain_consensus", "exclude"}
-        and bool(clean(item.get("reason")))
+        and (clean(item.get("decision")) != "exclude" or bool(clean(item.get("reason"))))
         and evidence_ready
     )
 
@@ -881,6 +883,19 @@ def selected_excerpt_evidence(review: dict, input_item: dict, field: str) -> str
     return ""
 
 
+def pipeline_api():
+    """Reuse the pipeline's deterministic semantic checks during each review chunk."""
+    global _PIPELINE_API
+    if _PIPELINE_API is None:
+        spec = importlib.util.spec_from_file_location("film_pipeline_contract_api", PIPELINE)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"无法加载最终复核校验器：{PIPELINE}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _PIPELINE_API = module
+    return _PIPELINE_API
+
+
 def final_excerpt_review_is_filled(review: dict, input_item: dict | None = None) -> bool:
     decision = clean(review.get("decision"))
     if decision not in {"keep", "drop"}:
@@ -889,27 +904,46 @@ def final_excerpt_review_is_filled(review: dict, input_item: dict | None = None)
     if clean(review.get("review_fingerprint")) != clean(input_item.get("review_fingerprint")):
         return False
     if decision == "keep":
-        if clean(review.get("stance")) not in {"positive", "objective", "negative"}:
+        reviewed_stance = clean(review.get("stance"))
+        if reviewed_stance not in {"positive", "objective", "negative"}:
+            return False
+        expected_stance = clean(input_item.get("cluster_stance"))
+        if expected_stance and reviewed_stance != expected_stance:
             return False
         if review.get("self_contained") is not True:
             return False
-        if any(not selected_excerpt_evidence(review, input_item, field) for field in ("aspect_evidence", "stance_evidence")):
+        excerpt = clean("".join(str(value) for value in (input_item.get("excerpt_segments") or {}).values()))
+        aspect_evidence = selected_excerpt_evidence(review, input_item, "aspect_evidence")
+        stance_evidence = selected_excerpt_evidence(review, input_item, "stance_evidence")
+        if any(not evidence or evidence not in excerpt for evidence in (aspect_evidence, stance_evidence)):
+            return False
+        api = pipeline_api()
+        if expected_stance and api.stance_evidence_conflicts(expected_stance, stance_evidence):
             return False
         if input_item.get("target_review_required") and (
             review.get("target_passed") is not True or not clean(review.get("target_evidence"))
         ):
             return False
+        raw_excerpt = clean(input_item.get("raw_excerpt")) or excerpt
+        if input_item.get("target_review_required") and clean(review.get("target_evidence")) not in raw_excerpt:
+            return False
         if input_item.get("work_consistency_review_required") and (
             review.get("work_consistency_passed") is not True or not clean(review.get("work_consistency_evidence"))
         ):
             return False
+        if input_item.get("work_consistency_review_required") and clean(review.get("work_consistency_evidence")) not in raw_excerpt:
+            return False
         if input_item.get("short_excerpt"):
             if review.get("short_excerpt_justified") is not True:
                 return False
-            if not clean(review.get("short_excerpt_reason")) or not selected_excerpt_evidence(review, input_item, "specific_support_evidence"):
+            support_evidence = selected_excerpt_evidence(review, input_item, "specific_support_evidence")
+            if not clean(review.get("short_excerpt_reason")) or not api.short_excerpt_support_is_specific(excerpt, support_evidence):
                 return False
         if input_item.get("promotion_markers"):
-            if review.get("independent_opinion_passed") is not True or not selected_excerpt_evidence(review, input_item, "opinion_evidence"):
+            opinion_evidence = selected_excerpt_evidence(review, input_item, "opinion_evidence")
+            if review.get("independent_opinion_passed") is not True or not opinion_evidence or opinion_evidence not in excerpt:
+                return False
+            if not api.promotion_evidence_is_independent(opinion_evidence):
                 return False
         return True
     if not clean(review.get("reason")):

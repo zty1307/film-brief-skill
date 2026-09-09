@@ -88,7 +88,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须填写当前来源专属的 `reason` 和证据。控制器每轮提供下一批不超过60条且不超过约120KB的精简记录；分片不重复整篇正文、统一回查说明、质量中间量或候选命中词。优先填写 `evidence_candidate_index`，脚本自动还原逐字原文及位置；候选均不适用时，才按 `workflow_status.full_source_file` 和 `source_id` 回查全文并填写 `evidence` 或 `evidence_position`。提交由脚本账本累计，执行模型不复制历史答案。
+`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须提交逐字证据；`retain_core` 和 `retain_consensus` 无需重复写理由，`exclude` 另填简短具体理由。控制器每轮提供下一批不超过60条且不超过约120KB的精简记录；分片不重复整篇正文、统一回查说明、质量中间量或候选命中词。优先填写 `evidence_candidate_index`，脚本自动还原逐字原文及位置；候选均不适用时，才按 `workflow_status.full_source_file` 和 `source_id` 回查全文并填写 `evidence` 或 `evidence_position`。提交由脚本账本累计，执行模型不复制历史答案。
 
 ## 同稿审计
 
