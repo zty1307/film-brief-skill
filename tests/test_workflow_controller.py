@@ -155,11 +155,6 @@ for _ in range(30):
             template["reviews"][item["review_key"]] = {
                 "fingerprint": item["fingerprint"], "decision": "pass", "report_role": "report_point",
                 "scope_type": "current_broadcast_reaction", "issues": [],
-                "title_claims": [
-                    {"claim": "演员表演细腻自然", "supporting_source_ids": ids},
-                    {"claim": "人物关系与情绪变化真实可信", "supporting_source_ids": ids},
-                ],
-                "member_support": {source_id: {"claim_indices": [0, 1], "evidence": "表演细腻自然，人物关系也显得真实可信"} for source_id in ids},
                 "reason": "标题两项主张均有当前分配片段中的直接证据",
             }
             assert "表演细腻自然，人物关系也显得真实可信" in passage

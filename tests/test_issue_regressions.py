@@ -53,6 +53,15 @@ assert not p.promotion_evidence_is_independent(
 assert p.promotion_evidence_is_independent(
     "平台数据显示预约量突破一千万，粉丝应援规模也引发媒体关注。"
 )
+assert not p.promotion_evidence_is_independent(
+    "关注+转发，抽7位赴约人送月卡，联名周边和主题门店等你前来打卡。"
+)
+
+# Display cleanup removes literal escape noise, incomplete platform-link tails,
+# and long SEO/entity rosters without rewriting the actual opinion sentence.
+roster_text = "成毅的演技自然细腻。 成毅｜赴山海｜萧秋水｜李沉舟｜肖明明｜王权富贵｜卢云"
+assert p.clean_display_excerpt(roster_text) == "成毅的演技自然细腻。"
+assert p.clean_display_excerpt("《测试剧》动作利落。\\n\\n[作者的微博视频") == "《测试剧》动作利落。"
 
 
 # Date-only export names are common and should not require period_windows.
@@ -114,6 +123,22 @@ assert alignment["aspect"]["passed"] and alignment["aspect"]["basis"] == "ai_rev
 assert not p.passage_alignment(
     semantic_row, {**semantic_window, "anchor_hits": []}, semantic_definition, semantic_target, {}
 )["aspect"]["passed"]
+
+# Final display alignment may not borrow the source title when the chosen
+# excerpt itself has drifted to an unrelated paragraph.
+title_only_row = {"id": "title-only", "title": "《测试剧》热议", "body": "另一条娱乐新闻引发争议。"}
+title_only_alignment = p.passage_alignment(
+    title_only_row,
+    {"start": 0, "end": 12, "text": "另一条娱乐新闻引发争议。"},
+    {"id": "N01", "title": "批评剧情问题", "stance": "negative", "required_any": []},
+    semantic_target,
+    {},
+    allow_title_fallback=False,
+)
+assert not title_only_alignment["target"]["passed"]
+
+assert p.other_work_titles("《测试剧》定档，观众期待。", semantic_target) == []
+assert p.other_work_titles("《测试剧》与《另一部剧》同期播出。", semantic_target) == ["另一部剧"]
 
 
 # A coherent viewpoint may use two non-adjacent verbatim spans before the
@@ -411,6 +436,7 @@ set_template = w.cluster_set_review_template_payload(
 )
 assert "测试\tP01" in set_template["reviews"]
 assert not w.cluster_set_review_is_filled(set_template["reviews"]["测试\tP01"])
+assert "title_claims" not in set_template["reviews"]["测试\tP01"]
 excerpt_input = {
     "view_id": "source::P01",
     "review_fingerprint": "fp-1",
@@ -479,6 +505,20 @@ assert not w.final_excerpt_review_is_filled(strict_review, strict_input), "客�
 strict_input["excerpt_segments"] = {"1": "平台数据显示预约量达到一千万。"}
 assert w.final_excerpt_review_is_filled(strict_review, strict_input)
 
+positive_input = {
+    "view_id": "positive::P01", "review_fingerprint": "fp-positive",
+    "cluster_stance": "positive", "aspect_terms": ["社畜", "打工人"],
+    "excerpt_segments": {"1": "《赴山海》讲述现代社畜肖明明穿书进入江湖。"},
+}
+positive_review = {
+    "review_fingerprint": "fp-positive", "decision": "keep",
+    "aspect_evidence_candidate_index": 1, "stance": "positive",
+    "stance_evidence_candidate_index": 1, "self_contained": True,
+}
+assert not w.final_excerpt_review_is_filled(positive_review, positive_input), "纯剧情简介不得被模型硬标成正面"
+positive_input["excerpt_segments"] = {"1": "《赴山海》的社畜设定很有共鸣，打工人看了觉得真实。"}
+assert w.final_excerpt_review_is_filled(positive_review, positive_input)
+
 promo_input = {
     "view_id": "promo::O01", "review_fingerprint": "fp-4",
     "cluster_stance": "objective", "promotion_markers": ["全力冲刺"],
@@ -498,6 +538,42 @@ assert p.short_excerpt_support_is_specific(
     "演员用眼神和停顿推进情绪，表演显得细腻自然。",
     "演员用眼神和停顿推进情绪",
 )
+assert not p.short_excerpt_support_is_specific("成毅这原声台词太绝了，硬控我。", "成毅这原声台词太绝了，硬控我。")
+
+# A short reviewed passage no longer blocks an available 70-150 character
+# deterministic excerpt, which prevents a large late re-excerpt loop.
+long_body = "《测试剧》的打戏很精彩。演员在竹林里连续完成转身、挥剑和近身对打，动作衔接利落，镜头也没有用慢动作掩饰，整段看下来很有武侠质感。人物的力量感和招式节奏也被完整保留下来。"
+short_window = {
+    "start": 0, "end": len("《测试剧》的打戏很精彩。"), "text": "《测试剧》的打戏很精彩。",
+    "fragments": ["《测试剧》的打戏很精彩。"],
+    "positions": [[0, len("《测试剧》的打戏很精彩。")]], "reviewed_fragments": True,
+}
+long_candidate = p.excerpt_candidates(long_body, short_window, {
+    "id": "P01", "title": "肯定打戏动作利落", "stance": "positive", "required_any": ["打戏", "动作"],
+})[0]
+assert len(p.clean_display_excerpt(long_candidate["excerpt"])) >= 70
+
+# Repeated schedule facts are background data notes. Preserve the best source
+# for each fact type and channel, while ordinary viewpoints remain untouched.
+note_items = [
+    {"source_id": "a", "score": 9, "margin": 3, "window": {"text": "《测试剧》9月11日18:00在腾讯视频定档开播。"}, "source": {"id": "a", "channel": "微博", "decision": "retain_core", "quality": 9, "body": "甲"}},
+    {"source_id": "b", "score": 8, "margin": 2, "window": {"text": "《测试剧》9月11日18:00在腾讯视频定档开播。"}, "source": {"id": "b", "channel": "微博", "decision": "retain_core", "quality": 8, "body": "乙"}},
+    {"source_id": "c", "score": 7, "margin": 1, "window": {"text": "《测试剧》9月11日18:00在腾讯视频定档开播。"}, "source": {"id": "c", "channel": "公众文章", "decision": "retain_core", "quality": 7, "body": "丙"}},
+    {"source_id": "d", "score": 6, "margin": 1, "window": {"text": "《测试剧》现已官宣定档。"}, "source": {"id": "d", "channel": "微博", "decision": "retain_core", "quality": 6, "body": "丁"}},
+]
+assert {item["source_id"] for item in p.deduplicate_data_note_members(note_items)} == {"a", "c"}
+
+# Definition repair must expose distinct themes instead of the first repeated
+# wording, otherwise ordinary models need several repair rounds.
+gap_rows = [
+    {"source_id": f"schedule-{index:02d}", "title": "定档消息", "current_passage": "该剧正式定档并公布播出平台。"}
+    for index in range(45)
+] + [
+    {"source_id": "acting-01", "title": "表演讨论", "current_passage": "观众认为演员用眼神和停顿呈现人物变化。"},
+    {"source_id": "costume-01", "title": "制作讨论", "current_passage": "观众肯定服装纹样和实景搭建带来的质感。"},
+]
+gap_sample = w.diverse_review_sample(gap_rows, 10)
+assert {item["source_id"] for item in gap_sample} & {"acting-01", "costume-01"}
 
 # Changing one excerpt keeps reviews for unchanged item fingerprints, so a
 # targeted re-excerpt does not force hundreds of unrelated reviews to rerun.

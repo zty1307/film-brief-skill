@@ -132,14 +132,8 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
       "decision": "pass",
       "report_role": "report_point",
       "scope_type": "current_broadcast_reaction",
-      "title_claims": [
-        {
-          "claim": "演员表演自然生活化",
-          "supporting_source_ids": ["来源ID一", "来源ID二"]
-        }
-      ],
       "issues": [],
-      "reason": "标题各项均有簇内证据，所有成员共同支持同一报告体观点"
+      "reason": "代表样本与低对齐样本均支持同一报告体观点，立场和范围一致"
     }
   },
   "count_reviews": {
@@ -155,7 +149,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 
 第一次运行 `cluster` 后生成 `cluster_set_review_input.json`。审查键固定为“批次名 + 制表符 + 簇ID”，`fingerprint` 必须逐字复制本次输入；标题、立场或成员来源变化都会令旧审查失效。每个非空簇必须覆盖。`report_role` 仅允许 `report_point`、`subtopic`、`data_note`、`rare_signal`；`data_note` 必须使用 `objective` 立场。角色只帮助人工理解观点在报告中的用途，不形成页面层级，也不影响来源去留。
 
-`cluster_set_review_input.json` 每簇最多给出8条代表样本，完整成员ID仍进入 `fingerprint`。`title_claims` 把簇标题中的并列判断拆开，每项至少列出一个实际簇内来源ID。`decision:"pass"` 与空 `issues` 表示已经综合检查标题、立场、范围、来源角色和颗粒度，不再分别填写多组同义布尔值和原因。电视剧的 `scope_type` 取 `pre_broadcast_expectation`、`current_broadcast_reaction`、`later_reputation`、`mixed_time_explicit`；综艺取 `latest_episode`、`previous_episode_prominent`、`program_level_current`、`mixed_scope_explicit`。客观簇另填合法 `objective_subtype`。
+`cluster_set_review_input.json` 每簇最多给出8条样本，脚本同时覆盖高质量代表项、低对齐项和分布位置，完整成员ID仍进入 `fingerprint`。AI只填写通过或返修结论、来源角色、范围类型和一句理由，不再拆标题主张或抄写来源ID。`decision:"pass"` 与空 `issues` 表示已经综合检查标题、立场、范围、来源角色和颗粒度。电视剧的 `scope_type` 取 `pre_broadcast_expectation`、`current_broadcast_reaction`、`later_reputation`、`mixed_time_explicit`；综艺取 `latest_episode`、`previous_episode_prominent`、`program_level_current`、`mixed_scope_explicit`。客观簇另填合法 `objective_subtype`。
 
 `count_reviews` 是页面生成前的整期簇数审查。脚本计算指纹、实际簇数和9—16范围状态；AI只填写 `decision`、`issues` 和综合理由，不再抄写这些确定数据。范围外另填 `exception_reason`，说明继续拆分或合并为何损害语义质量。脚本不会为了达标自动调整观点。
 

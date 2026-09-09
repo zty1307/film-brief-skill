@@ -142,11 +142,21 @@ DISPLAY_PROMO_BOILERPLATE = re.compile(
     r"(?:你也)?戳卡片(?:来)?看看[，！!。~～]*|"
     r"(?:每天用智搜看热点[，,]?)?分享抽\d+(?:\.\d+)?元[~～！!。]*"
 )
+DISPLAY_STRAY_MARKDOWN_TAIL = re.compile(
+    r"\s*\[[^\]\r\n]{0,80}(?:的(?:微博|小红书)?视频)?\s*$|\s*\]\([^)]*$",
+    re.I,
+)
 PROMOTION_OPERATIONAL = re.compile(
     r"抽奖|随机抽|加抽|兑奖|礼包|赠票|扫码|二维码|购票|单人票|双人票|票价|报名|"
     r"活动规则|领取福利|点击链接|直播间下单|转发抽|云包场|送礼物|应援|控评|"
     r"(?:正片|每日|话题|任务|互动|参与)打卡|打卡(?:任务|互动)|"
-    r"评论区盖楼|全平台分(?:享|xiang)|详细教程|福利任务|主攻.{0,6}站内|全力冲刺"
+    r"评论区盖楼|全平台分(?:享|xiang)|详细教程|福利任务|主攻.{0,6}站内|全力冲刺|"
+    r"免费获得|角色表白|表白活动|动态皮肤|定制票根|热度值加成|签到|解锁|前来打卡|请.*查收"
+)
+PROMOTION_DIRECT_CTA = re.compile(
+    r"关注\s*[+＋和与]?\s*转发|转发|抽\s*\d|扫码|点击|领取|免费获得|请.{0,12}查收|"
+    r"锁定.{0,18}(?:平台|频道|开播|播出)|前来打卡|加入.{0,12}(?:旅程|活动)|邀你|一起共赴|"
+    r"角色表白|表白活动|热度值加成|签到|解锁|下单|购买|评论区|盖楼|冲刺"
 )
 AI_GENERATED_DISCLOSURE = re.compile(
     r"(?:本文|本篇|该文|文章|内容).{0,12}(?:由|使用|借助|经).{0,10}(?:AI|人工智能|ChatGPT|GPT).{0,16}(?:生成|创作|撰写|改写|润色)",
@@ -178,7 +188,7 @@ def clean(value: object) -> str:
 
 def _clean_display_excerpt(value: object, *, hashtag_mode: str) -> str:
     """Delete non-semantic platform markup without rewriting the source opinion."""
-    text = html.unescape(clean(value))
+    text = html.unescape(clean(value)).replace("\\n", " ").replace("\\r", " ").replace("\\t", " ")
     text = DISPLAY_MARKDOWN_LINK.sub(" ", text)
     text = DISPLAY_RAW_URL.sub(" ", text)
     # Social exports may serialize adjacent tags as ``#节目#人物名``.  The
@@ -200,6 +210,7 @@ def _clean_display_excerpt(value: object, *, hashtag_mode: str) -> str:
     text = DISPLAY_PLATFORM_EMOTE.sub(" ", text)
     text = DISPLAY_MENTION.sub(" ", text)
     text = DISPLAY_PROMO_BOILERPLATE.sub(" ", text)
+    text = DISPLAY_STRAY_MARKDOWN_TAIL.sub(" ", text)
     text = "".join(
         " " if (
             0x1F000 <= ord(char) <= 0x1FAFF
@@ -212,6 +223,21 @@ def _clean_display_excerpt(value: object, *, hashtag_mode: str) -> str:
     text = re.sub(r"(?:网页链接|共创视频|展开全文|收起全文)", " ", text)
     text = re.sub(r"[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]", "", text)
     text = re.sub(r"\s+", " ", text)
+    # Platform exports often append an SEO/entity roster after the actual
+    # sentence (for example "主演｜作品名｜角色名｜...").  It is metadata, not
+    # opinion text.  Remove only long terminal runs with no judgement syntax.
+    last_stop = max((text.rfind(mark) for mark in "。！？!?"), default=-1)
+    if last_stop >= 0 and last_stop + 1 < len(text):
+        suffix = text[last_stop + 1:].strip()
+        tokens = [part for part in re.split(r"[\s|｜/·•]+", suffix) if part]
+        if (
+            len(tokens) >= 5
+            and len(suffix) <= 140
+            and not OPINION.search(suffix)
+            and not JUDGEMENT.search(suffix)
+            and not re.search(r"[，；：,.?？!！]", suffix)
+        ):
+            text = text[:last_stop + 1]
     text = re.sub(r"\s+([，。！？；：、,.!?;:])", r"\1", text)
     text = re.sub(r"(?:[/|｜·•▪■□◆◇★☆※→←]+\s*)+", " ", text)
     text = re.sub(r"\s+", " ", text)
@@ -265,6 +291,8 @@ def promotion_evidence_is_independent(value: object) -> bool:
     """Reject instructions masquerading as viewpoints while keeping real commentary."""
     text = clean(value)
     if not text:
+        return False
+    if PROMOTION_DIRECT_CTA.search(text):
         return False
     if OPINION.search(text) or JUDGEMENT.search(text) or OBJECTIVE_ANALYSIS.search(text):
         return True
@@ -563,7 +591,8 @@ def semantic_review_fingerprint(item: dict) -> str:
         key: item.get(key)
         for key in (
             "view_id", "cluster_id", "cluster_title", "cluster_stance",
-            "excerpt_segments", "promotion_markers", "short_excerpt",
+            "excerpt_segments", "aspect_terms", "aspect_candidate_indexes",
+            "promotion_markers", "short_excerpt",
             "target_review_required", "work_consistency_review_required",
             "work_conflict_markers",
         )
@@ -578,11 +607,20 @@ def short_excerpt_support_is_specific(excerpt: object, evidence: object) -> bool
     evidence_text = clean(evidence)
     if not evidence_text or evidence_text not in excerpt_text or len(normalized(evidence_text)) < 8:
         return False
-    if DETAIL_CUE.search(evidence_text) or FACT_WARNING.search(evidence_text):
+    if FACT_WARNING.search(evidence_text):
+        return True
+    if re.search(r"[“\"]([^”\"]{4,})[”\"]", evidence_text):
         return True
     dimensions = set(DIMENSION.findall(evidence_text))
     has_reasoning = bool(re.search(r"因为|在于|通过|例如|比如|其中|从.{0,12}(?:看出|体现)|使得|导致", evidence_text))
-    return bool(len(dimensions) >= 2 and has_reasoning and (OPINION.search(evidence_text) or JUDGEMENT.search(evidence_text)))
+    has_concrete_detail = bool(
+        DETAIL_CUE.search(evidence_text)
+        and re.search(r"推进|拉开|切换|变化|停顿|转身|走路|说话|抬眼|落泪|挥剑|对打|实拍|搭建|复原|还原|层层|逐渐|从.{0,12}到", evidence_text)
+    )
+    return bool(
+        has_concrete_detail
+        or (len(dimensions) >= 2 and has_reasoning and (OPINION.search(evidence_text) or JUDGEMENT.search(evidence_text)))
+    )
 
 
 def stance_evidence_conflicts(expected: object, evidence: object) -> bool:
@@ -596,6 +634,19 @@ def stance_evidence_conflicts(expected: object, evidence: object) -> bool:
     if expected_value == "objective":
         return inferred != "混合或中性"
     return True
+
+
+def stance_evidence_supports(expected: object, evidence: object) -> bool:
+    """Require the cited sentence to actually express the cluster polarity."""
+    expected_value = clean(expected)
+    inferred = stance(clean(evidence))
+    if expected_value == "positive":
+        return inferred == "正向"
+    if expected_value == "negative":
+        return inferred == "负向"
+    if expected_value == "objective":
+        return inferred == "混合或中性"
+    return False
 
 
 def indexed_excerpt_evidence(review: dict, input_item: dict, field: str) -> str:
@@ -756,6 +807,31 @@ def target_layers(target: dict) -> tuple[list[str], list[str], list[str], list[s
     return strong, weak, auxiliary, comparisons
 
 
+def other_work_titles(text: object, target: dict) -> list[str]:
+    """Find bracketed work titles that are not aliases of the current target."""
+    strong, weak, _, comparisons = target_layers(target)
+    target_keys = [normalized(value) for value in strong + weak if normalized(value)]
+    output = []
+    source = clean(text)
+    for match in re.finditer(r"《([^》]{1,40})》", source):
+        title = match.group(1)
+        key = normalized(title)
+        if not key or any(key == target_key or key in target_key or target_key in key for target_key in target_keys):
+            continue
+        context = source[max(0, match.start() - 28):min(len(source), match.end() + 28)]
+        is_screen_or_book_work = bool(re.search(
+            r"电视剧|网剧|短剧|电影|影片|综艺|节目|剧集|新剧|该剧|本剧|主演|导演|"
+            r"定档|开播|播出|上线|上映|接档|改编|原著|小说|第[一二三四五六七八九十\d]+季",
+            context,
+        ))
+        if (is_screen_or_book_work or any(key == normalized(value) for value in comparisons)) and title not in output:
+            output.append(title)
+    for value in comparisons:
+        if clean(value) in source and clean(value) not in output:
+            output.append(clean(value))
+    return output
+
+
 def term_hits(text: str, terms: list[str]) -> list[str]:
     return [term for term in terms if len(term) >= 2 and term in text]
 
@@ -879,11 +955,12 @@ def stance(text: str) -> str:
     positive_pattern = re.compile(
         r"好看|出彩|惊喜|真实|细腻|精彩|过瘾|带感|质感|高级|贴合|适配|还原|亮点|加分|成功|喜欢|认可|合理|自然|生动|可信|"
         r"好笑|笑疯|笑死|笑出声|笑一年|哈哈|太有梗|有梗|可爱|舒服|绝了|封神|拉满|冲击力|张力|破功|亮眼|投入|用心|成长|鼓励|好机会|"
-        r"鲜活|新鲜|创新|突破|值得|厉害|太会|稳了|共鸣|欢呼|好感|幽默|有趣|反差|进步|魅力|折服|热忱|有爱|心满意足|沉浸|走心|戳心|不可替代|灵魂"
+        r"鲜活|新鲜|创新|突破|值得|厉害|太会|稳了|共鸣|欢呼|好感|幽默|有趣|反差|进步|魅力|折服|热忱|有爱|心满意足|沉浸|走心|戳心|不可替代|灵魂|"
+        r"期待|扎实|豪华|强大|精湛|匠心|诚意|行云流水|吊足胃口|硬核|利落|震撼|热血|燃|太顶|太牛"
     )
     negative_pattern = re.compile(
         r"难看|失望|拉胯|油腻|尴尬|出戏|违和|不合理|拖沓|注水|悬浮|差评|毁|魔改|弃剧|劝退|翻车|用力过猛|"
-        r"过度|审美疲劳|消耗|消费|不适|没分寸|套路|生硬|低质"
+        r"过度|审美疲劳|消耗|消费|不适|没分寸|套路|生硬|低质|担忧|质疑|吐槽|看衰|不满|担心|短板|糟糕|塑料感|老套|僵硬|呆板"
     )
     if re.search(r"哈哈|笑一年|笑疯|笑死|笑出声|有梗|破功|综艺效果|可爱", text) and not re.search(
         r"批评|质疑|问题|不适|没分寸|过度|审美疲劳|尴尬|难看|拉胯|油腻|出戏|违和|拖沓|注水|悬浮|差评|劝退|翻车|用力过猛",
@@ -2061,8 +2138,12 @@ def cluster_score(
     expected_stance = clean(definition.get("stance"))
     if expected_stance == "positive" and local_stance == "负向":
         score -= 30.0
+    elif expected_stance == "positive" and local_stance == "混合或中性":
+        score -= 8.0
     elif expected_stance == "negative" and local_stance == "正向":
         score -= 30.0
+    elif expected_stance == "negative" and local_stance == "混合或中性":
+        score -= 8.0
     elif expected_stance == "objective" and local_stance != "混合或中性" and not definition.get("objective_meta"):
         score -= 12.0
     return score, hits
@@ -2235,6 +2316,7 @@ def passage_alignment(
     target_config: dict,
     override: dict,
     secondary: bool = False,
+    allow_title_fallback: bool = True,
 ) -> dict:
     text = clean(window.get("text"))
     strong_terms, weak_terms, _, comparisons = target_layers(target_config)
@@ -2271,11 +2353,13 @@ def passage_alignment(
         target_passed, target_basis = True, "ai_reviewed_source_target_evidence"
     elif reviewed_source_overlap:
         target_passed, target_basis = True, "reviewed_source_passage_overlap"
-    else:
+    elif allow_title_fallback:
         title_hits = term_hits(clean(row.get("title")), strong_terms)
         source_comparisons = term_hits(source, comparisons)
         target_passed = bool(title_hits and not source_comparisons)
         target_basis = "single_work_title_anchor" if target_passed else "no_passage_target_anchor"
+    else:
+        target_passed, target_basis = False, "no_passage_target_anchor"
 
     required = effective_required_terms(definition, target_config)
     aspect_hits = [term for term in required if term in text]
@@ -2349,6 +2433,71 @@ def flatten_overrides(path: Path | None) -> dict[str, dict]:
 def order_for_workbench(items: list[dict]) -> list[dict]:
     """Order every aligned source; ranking never determines admission."""
     return sorted(items, key=lambda item: row_rank(item["source"]), reverse=True)
+
+
+def representative_cluster_members(items: list[dict], limit: int = 8) -> list[dict]:
+    """Expose both strongest and weakest assignments so a broad cluster cannot hide in its top rows."""
+    if len(items) <= limit:
+        return order_for_workbench(items)
+    ranked = order_for_workbench(items)
+    by_alignment = sorted(
+        items,
+        key=lambda item: (
+            float(item.get("score", 0)),
+            float(item.get("margin", 0)),
+            item.get("source_id", ""),
+        ),
+    )
+    selected: list[dict] = []
+    seen: set[str] = set()
+    for candidate in [*ranked[:4], *by_alignment[:2]]:
+        source_id = clean(candidate.get("source_id"))
+        if source_id and source_id not in seen:
+            selected.append(candidate)
+            seen.add(source_id)
+    remaining = [item for item in ranked if clean(item.get("source_id")) not in seen]
+    while remaining and len(selected) < limit:
+        index = round((len(remaining) - 1) * (len(selected) - 5) / max(1, limit - 6)) if len(selected) >= 6 else 0
+        candidate = remaining.pop(max(0, min(index, len(remaining) - 1)))
+        selected.append(candidate)
+    return selected[:limit]
+
+
+def cluster_is_schedule_note(definition: dict) -> bool:
+    text = " ".join(clean(definition.get(key)) for key in ("title", "summary"))
+    return bool(
+        re.search(r"定档|开播|排播|接档|同步更新|播出时间|追剧日历", text)
+        and not re.search(r"热度|口碑|反响|评价|争议|竞争|市场|影响|价值|看好|质疑|批评|担忧", text)
+    )
+
+
+def data_note_fact_facets(value: object) -> set[str]:
+    """Return the small set of background facts that a schedule passage can evidence."""
+    text = clean(value)
+    facets = {"schedule_announcement"}
+    if re.search(r"\d{1,2}月\d{1,2}日|\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}", text):
+        facets.add("airing_date")
+    if re.search(r"\d{1,2}[：:]\d{2}|晚间|黄金档", text):
+        facets.add("airing_time")
+    if re.search(r"腾讯视频|爱奇艺|优酷|芒果TV|CCTV-?\d+|央视|卫视|双平台|多平台", text, re.I):
+        facets.add("airing_platform")
+    if re.search(r"每日|每周[一二三四五六日天]|日更|连更|首更|更新\d+集|会员|VIP", text, re.I):
+        facets.add("update_cadence")
+    return facets
+
+
+def deduplicate_data_note_members(items: list[dict]) -> list[dict]:
+    """Cover each schedule-fact type per channel without retaining every rewrite."""
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for item in items:
+        channel = clean(item["source"].get("channel")) or "未知渠道"
+        for facet in data_note_fact_facets(item.get("window", {}).get("text")):
+            groups[(channel, facet)].append(item)
+    chosen_by_id = {}
+    for group in groups.values():
+        best = max(group, key=lambda candidate: row_rank(candidate["source"]))
+        chosen_by_id[best["source_id"]] = best
+    return order_for_workbench(list(chosen_by_id.values()))
 
 
 def cluster_set_review_fingerprint(batch: str, definition: dict, members: list[dict]) -> str:
@@ -2498,6 +2647,8 @@ def validate_cluster_set_review(
         issues.append("report_role_invalid")
     if clean(definition.get("title")).startswith("记录") and report_role != "data_note":
         issues.append("record_title_requires_data_note_role")
+    if cluster_is_schedule_note(definition) and report_role != "data_note":
+        issues.append("schedule_or_airing_fact_requires_data_note_role")
     if report_role == "data_note" and clean(definition.get("stance")) != "objective":
         issues.append("data_note_requires_objective_stance")
     if any(
@@ -2508,20 +2659,6 @@ def validate_cluster_set_review(
         )
     ):
         issues.append("legacy_hierarchy_fields_not_allowed")
-    claims = review.get("title_claims")
-    if not isinstance(claims, list) or not claims:
-        issues.append("title_claims_missing")
-    else:
-        for index, claim in enumerate(claims):
-            if not isinstance(claim, dict) or not clean(claim.get("claim")):
-                issues.append(f"title_claim_{index}_invalid")
-                continue
-            support = claim.get("supporting_source_ids")
-            if not isinstance(support, list) or not support:
-                issues.append(f"title_claim_{index}_support_missing")
-            elif any(clean(source_id) not in member_ids for source_id in support):
-                issues.append(f"title_claim_{index}_support_outside_cluster")
-
     objective_subtype = clean(review.get("objective_subtype"))
     if clean(definition.get("stance")) == "objective":
         if objective_subtype not in ALLOWED_OBJECTIVE_SUBTYPES:
@@ -2746,7 +2883,18 @@ def command_cluster(args: argparse.Namespace) -> None:
             fingerprint = cluster_set_review_fingerprint(batch, definition, members)
             author_counts = Counter(clean(item["source"].get("author")) or "未知作者" for item in members)
             scope_counts = Counter(clean(item["source"].get("episode_scope")) or "未标注" for item in members)
-            representative_members = order_for_workbench(members)[:8]
+            representative_members = representative_cluster_members(members)
+            batch_size = len({
+                item["source_id"]
+                for batch_definition in batch_defs
+                for item in grouped.get((batch, str(batch_definition["id"])), [])
+            })
+            member_share = round(size / batch_size, 4) if batch_size else 0
+            warnings = []
+            if size >= 80 and member_share >= 0.25:
+                warnings.append("dominant_cluster_check_for_catch_all")
+            if cluster_is_schedule_note(definition):
+                warnings.append("schedule_or_airing_background_must_use_data_note")
             input_item = {
                 "review_key": review_key,
                 "fingerprint": fingerprint,
@@ -2756,6 +2904,8 @@ def command_cluster(args: argparse.Namespace) -> None:
                 "stance": definition["stance"],
                 "content_mode": clean(config["targets"][batch].get("content_mode")) or "serial_drama",
                 "independent_sources": size,
+                "member_share": member_share,
+                "warnings": warnings,
                 "representative_sample_count": len(representative_members),
                 "unique_authors": len(author_counts),
                 "largest_author_share": round(max(author_counts.values()) / size, 4) if size else 0,
@@ -2773,7 +2923,7 @@ def command_cluster(args: argparse.Namespace) -> None:
                     }
                     for item in representative_members
                 ],
-                "instruction": "只做簇级标题、立场、范围和颗粒度检查；每条标题主张给出至少一个代表样本ID。逐样本对齐由最终摘录语义复核统一完成。",
+                "instruction": "只做簇级标题、立场、范围和颗粒度检查；给出通过或返修结论及一句理由，不抄写样本和证据。逐样本对齐由最终摘录语义复核统一完成。",
             }
             set_review_input.append(input_item)
             issues, enriched = validate_cluster_set_review(
@@ -2843,7 +2993,12 @@ def command_cluster(args: argparse.Namespace) -> None:
             members = grouped.get(key, [])
             if not members:
                 continue
-            chosen = order_for_workbench(members)
+            chosen_pool = (
+                deduplicate_data_note_members(members)
+                if definition.get("report_role") == "data_note" and cluster_is_schedule_note(definition)
+                else members
+            )
+            chosen = order_for_workbench(chosen_pool)
             selected.extend(chosen)
             order_audit.append({
                 "batch": batch,
@@ -2924,12 +3079,21 @@ def excerpt_candidates(body: str, window: dict, definition: dict) -> list[dict]:
                 "excerpt": reviewed_excerpt,
                 "score": round(cluster_value, 3),
                 "reviewed_passage": True,
+                "display_length": reviewed_display_length,
+                "protect_reviewed_selection": bool(
+                    len(reviewed_positions) == 2 and reviewed_positions[0][1] < reviewed_positions[1][0]
+                ),
             })
     for start in indexes:
-        for end in range(start, min(len(spans), start + 2)):
+        for end in range(start, min(len(spans), start + 3)):
             if not any(index in anchored for index in range(start, end + 1)):
                 continue
-            raw = [body[spans[index]["start"]:spans[index]["end"]] for index in range(start, end + 1)]
+            if end - start + 1 > 2:
+                raw = [body[spans[start]["start"]:spans[end]["end"]]]
+                raw_positions = [[spans[start]["start"], spans[end]["end"]]]
+            else:
+                raw = [body[spans[index]["start"]:spans[index]["end"]] for index in range(start, end + 1)]
+                raw_positions = [[spans[index]["start"], spans[index]["end"]] for index in range(start, end + 1)]
             visible = " ".join(part.strip() for part in raw)
             display_length = len(clean_display_excerpt(visible))
             if len(normalized(visible)) < 18 or display_length > EXCERPT_MAX or LEADING_FRAGMENT.search(visible):
@@ -2939,14 +3103,20 @@ def excerpt_candidates(body: str, window: dict, definition: dict) -> list[dict]:
             length_bonus = min(display_length, EXCERPT_PREFERRED_MIN) / 20
             if display_length < EXCERPT_PREFERRED_MIN:
                 length_bonus -= (EXCERPT_PREFERRED_MIN - display_length) / 12
-            candidates.append({"fragments": raw, "positions": [[spans[index]["start"], spans[index]["end"]] for index in range(start, end + 1)], "excerpt": visible, "score": round(cluster_value * 1.4 + voice + length_bonus, 3)})
+            candidates.append({"fragments": raw, "positions": raw_positions, "excerpt": visible, "score": round(cluster_value * 1.4 + voice + length_bonus, 3), "display_length": display_length})
     if not candidates:
         raw = body[window["start"]:window["end"]]
         if len(raw) > EXCERPT_MAX:
             cut = max((raw.rfind(mark, EXCERPT_PREFERRED_MIN, EXCERPT_MAX + 1) + 1 for mark in "。！？；!?;"), default=0)
             raw = raw[:cut or EXCERPT_MAX]
         return [{"fragments": [raw], "positions": [[window["start"], window["start"] + len(raw)]], "excerpt": raw.strip(), "score": 0.0}]
-    candidates.sort(key=lambda item: (not item.get("reviewed_passage", False), -item["score"], item["positions"][0][0]))
+    candidates.sort(key=lambda item: (
+        not item.get("protect_reviewed_selection", False),
+        int(item.get("display_length", 0) < EXCERPT_PREFERRED_MIN),
+        not item.get("reviewed_passage", False),
+        -item["score"],
+        item["positions"][0][0],
+    ))
     return candidates
 
 
@@ -2997,7 +3167,8 @@ def fragments_extract_hashtag_interior(body: str, positions: list[list[int]]) ->
         for match in DISPLAY_ADJACENT_TRAILING_TAGS.finditer(body)
     )
     return any(
-        tag_start < start and end < tag_end
+        (tag_start < start < tag_end)
+        or (tag_start < end < tag_end)
         for start, end in positions
         for tag_start, tag_end in hashtag_spans
     )
@@ -3480,22 +3651,45 @@ def command_render(args: argparse.Namespace) -> None:
                     continue
 
                 # 最终立场不再复用归簇阶段的 passage_stance；它由独立摘录语义复核给出。
+                target_config = period_config["targets"][batch]
+                source_other_works = other_work_titles(body, target_config)
                 final_alignment = passage_alignment(
-                    row, {"text": excerpt}, definition,
-                    period_config["targets"][batch], {},
+                    row, {"text": raw_excerpt}, definition,
+                    target_config, {}, allow_title_fallback=not source_other_works,
                 )
                 context_start = max(0, positions[0][0] - 60)
                 context_end = min(len(body), positions[-1][1] + 60)
                 promotion_markers = promotion_review_markers(excerpt)
                 short_excerpt = len(excerpt) < EXCERPT_PREFERRED_MIN
-                comparison_terms = target_layers(period_config["targets"][batch])[3]
-                work_conflict_markers = [term for term in comparison_terms if term and term in raw_excerpt]
+                comparison_terms = target_layers(target_config)[3]
+                work_conflict_markers = list(dict.fromkeys([
+                    *[term for term in comparison_terms if term and term in raw_excerpt],
+                    *[f"《{term}》" for term in other_work_titles(raw_excerpt, target_config)],
+                ]))
                 target_review_required = final_alignment.get("target", {}).get("passed") is not True
                 excerpt_segments = excerpt_evidence_segments(excerpt)
+                strong_terms, weak_terms, auxiliary_terms, comparison_terms = target_layers(target_config)
+                entity_terms = {normalized(term) for term in strong_terms + weak_terms + auxiliary_terms + comparison_terms}
+                aspect_terms = list(effective_required_terms(definition, target_config))
+                for term, _weight in sorted(keyword_pairs(definition), key=lambda pair: pair[1], reverse=True):
+                    if (
+                        term not in aspect_terms
+                        and normalized(term) not in entity_terms
+                        and term not in GENERIC_ROUTING_TERMS
+                    ):
+                        aspect_terms.append(term)
+                    if len(aspect_terms) >= 10:
+                        break
+                aspect_candidate_indexes = [
+                    int(index) for index, segment in excerpt_segments.items()
+                    if any(term in segment for term in aspect_terms)
+                ]
                 semantic_input = {
                     "view_id": view_id, "source_id": row["id"], "batch": batch, "cluster_id": str(definition["id"]),
                     "cluster_title": definition["title"], "cluster_stance": definition["stance"],
                     "excerpt_segments": excerpt_segments,
+                    "aspect_terms": aspect_terms,
+                    "aspect_candidate_indexes": aspect_candidate_indexes,
                     "promotion_markers": promotion_markers,
                     "excerpt_length": len(excerpt),
                     "short_excerpt": short_excerpt,
@@ -3533,6 +3727,10 @@ def command_render(args: argparse.Namespace) -> None:
                                 item_failures.append(f"{label}候选编号无效，且未提供最终摘录中的逐字证据")
                         if stance_evidence and stance_evidence_conflicts(definition["stance"], stance_evidence):
                             item_failures.append("立场证据自身呈现的立场与观点簇不一致")
+                        elif stance_evidence and not stance_evidence_supports(definition["stance"], stance_evidence):
+                            item_failures.append("立场证据没有实际表达观点簇要求的正面、客观或负面立场")
+                        if aspect_terms and not any(term in aspect_evidence for term in aspect_terms):
+                            item_failures.append("方面证据未命中该观点簇的任何具体方面词，需重截或重新归簇")
                         if target_review_required:
                             target_evidence = clean(semantic.get("target_evidence"))
                             if semantic.get("target_passed") is not True:
@@ -3554,14 +3752,12 @@ def command_render(args: argparse.Namespace) -> None:
                             elif not promotion_evidence_is_independent(opinion_evidence):
                                 item_failures.append("促销证据只有应援、送礼、抽奖或操作指令，没有独立评价或第三方事实观察")
                         if short_excerpt:
-                            if semantic.get("short_excerpt_justified") is not True:
-                                item_failures.append("不足70字的摘录未确认全文无法补足同观点依据")
-                            if not clean(semantic.get("short_excerpt_reason")):
-                                item_failures.append("不足70字的摘录缺少逐来源例外理由")
-                            support_evidence = indexed_excerpt_evidence(semantic, semantic_input, "specific_support_evidence")
-                            if not support_evidence or support_evidence not in excerpt:
-                                item_failures.append("不足70字的摘录缺少最终摘录中的逐字具体依据")
-                            elif not short_excerpt_support_is_specific(excerpt, support_evidence):
+                            support_evidence = (
+                                aspect_evidence
+                                if short_excerpt_support_is_specific(excerpt, aspect_evidence)
+                                else stance_evidence
+                            )
+                            if not short_excerpt_support_is_specific(excerpt, support_evidence):
                                 item_failures.append("不足70字的摘录只有泛泛态度，具体依据未包含动作、台词、场景、数据或因果分析")
                     elif semantic_decision == "drop" and not item_failures:
                         drop_reason = clean(semantic.get("reason"))
@@ -3608,7 +3804,12 @@ def command_render(args: argparse.Namespace) -> None:
                 if semantic:
                     aspect_evidence = indexed_excerpt_evidence(semantic, semantic_input, "aspect_evidence")
                     stance_evidence = indexed_excerpt_evidence(semantic, semantic_input, "stance_evidence")
-                    specific_support_evidence = indexed_excerpt_evidence(semantic, semantic_input, "specific_support_evidence")
+                    if short_excerpt:
+                        specific_support_evidence = (
+                            aspect_evidence
+                            if short_excerpt_support_is_specific(excerpt, aspect_evidence)
+                            else stance_evidence
+                        )
                     opinion_evidence = indexed_excerpt_evidence(semantic, semantic_input, "opinion_evidence")
                     if aspect_evidence:
                         semantic_effective["aspect_evidence"] = aspect_evidence
@@ -3634,7 +3835,7 @@ def command_render(args: argparse.Namespace) -> None:
                     final_alignment["aspect"] = {**final_alignment["aspect"], "passed": bool(aspect_evidence) and aspect_evidence in excerpt, "basis": "ai_final_excerpt_review", "review_evidence": aspect_evidence}
                     final_alignment["stance"] = {**final_alignment["stance"], "passed": clean(semantic.get("stance")) == clean(definition["stance"]), "reviewed": clean(semantic.get("stance")), "basis": "independent_final_excerpt_semantic_review", "review_evidence": stance_evidence}
 
-                staged_item = {"viewId": view_id, "sourceId": row["id"], "channel": row["channel"], "author": row["author"], "title": row["title"], "publishedAt": row["published"], "url": safe_url(row["url"]), "excerpt": excerpt, "body": body, "sourceStance": row.get("stance", ""), "clusterStance": definition["stance"], "mediaAuthority": {"subjectId": row.get("media_subject_id", ""), "subjectName": row.get("media_subject_name", ""), "accountAlias": row.get("media_account_alias", ""), "accountType": row.get("media_account_type", ""), "tier": row.get("media_authority_tier", "unclassified"), "rank": int(row.get("media_authority_rank", 0)), "basis": row.get("media_authority_basis", "")}, "linkHealth": row.get("link_health", {}), "alignment": final_alignment, "semanticReview": semantic_effective, "factWarning": row.get("fact_warning", ""), "excerptProvenance": {"fragments": fragments, "positions": positions, "basis": basis, "displayNormalization": DISPLAY_NORMALIZATION}, "excerptLengthReview": {"length": len(excerpt), "preferredMin": EXCERPT_PREFERRED_MIN, "max": EXCERPT_MAX, "exception": short_excerpt, "reason": clean((semantic or {}).get("short_excerpt_reason")) if short_excerpt else "", "specificSupportPassed": bool(specific_support_evidence) if short_excerpt else True, "specificSupportEvidence": specific_support_evidence if short_excerpt else ""}}
+                staged_item = {"viewId": view_id, "sourceId": row["id"], "channel": row["channel"], "author": row["author"], "title": row["title"], "publishedAt": row["published"], "url": safe_url(row["url"]), "excerpt": excerpt, "body": body, "sourceStance": row.get("stance", ""), "clusterStance": definition["stance"], "mediaAuthority": {"subjectId": row.get("media_subject_id", ""), "subjectName": row.get("media_subject_name", ""), "accountAlias": row.get("media_account_alias", ""), "accountType": row.get("media_account_type", ""), "tier": row.get("media_authority_tier", "unclassified"), "rank": int(row.get("media_authority_rank", 0)), "basis": row.get("media_authority_basis", "")}, "linkHealth": row.get("link_health", {}), "alignment": final_alignment, "semanticReview": semantic_effective, "factWarning": row.get("fact_warning", ""), "excerptProvenance": {"fragments": fragments, "positions": positions, "basis": basis, "displayNormalization": DISPLAY_NORMALIZATION}, "excerptLengthReview": {"length": len(excerpt), "preferredMin": EXCERPT_PREFERRED_MIN, "max": EXCERPT_MAX, "exception": short_excerpt, "reason": "短摘录本身含可核验的具体依据" if short_excerpt and specific_support_evidence else "", "specificSupportPassed": bool(specific_support_evidence) if short_excerpt else True, "specificSupportEvidence": specific_support_evidence if short_excerpt else ""}}
                 staged_items.append(staged_item)
                 if item_failures:
                     failures.extend({"view_id": view_id, "stage": "semantic", "issue": issue} for issue in item_failures)
@@ -3742,7 +3943,6 @@ def command_render(args: argparse.Namespace) -> None:
         "evidence_scopes": {
             "aspect_evidence_candidate_index": "excerpt_segments",
             "stance_evidence_candidate_index": "excerpt_segments",
-            "specific_support_evidence_candidate_index": "excerpt_segments",
             "opinion_evidence_candidate_index": "excerpt_segments",
             "exact_text_fallback": "仅当候选均不适用时，才填写对应的不带 _candidate_index 的逐字证据字段",
             "target_evidence_when_required": "raw_excerpt；若该字段省略则使用按序拼接的 excerpt_segments",
