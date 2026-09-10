@@ -753,8 +753,43 @@ split_review = p.deterministic_semantic_keep(
     },
     split_excerpt,
 )
-assert split_review and split_review["aspect_evidence_candidate_index"] == 1
-assert split_review["stance_evidence_candidate_index"] == 2
+# Separate sentences can still be kept by AI, but the script must not infer a
+# relation between an aspect-only sentence and a stance-only sentence.
+assert split_review is None
+joint_review = p.deterministic_semantic_keep(
+    {
+        **safe_semantic_input,
+        "view_id": "joint::P01",
+        "excerpt_segments": {
+            "1": "动作场面的镜头调度和招式设计配合自然，演员出招利落有力量，几场对打看得很过瘾，人物情绪也随着招式推进逐步落地，动作逻辑和空间关系都交代得清楚，整体完成度确实很高。",
+        },
+        "aspect_terms": ["镜头调度", "招式设计"],
+    },
+    "动作场面的镜头调度和招式设计配合自然，演员出招利落有力量，几场对打看得很过瘾，人物情绪也随着招式推进逐步落地，动作逻辑和空间关系都交代得清楚，整体完成度确实很高。",
+)
+assert joint_review and joint_review["aspect_evidence_candidate_index"] == 1
+assert joint_review["stance_evidence_candidate_index"] == 1
+ambiguous_review = p.deterministic_semantic_keep(
+    {
+        **safe_semantic_input,
+        "view_id": "ambiguous::P01",
+        "excerpt_segments": {
+            "1": "这次群像物料的整体气氛很有质感，人物状态看起来也不错，确实令人期待。",
+        },
+        "aspect_terms": ["群像", "质感"],
+    },
+    "这次群像物料的整体气氛很有质感，人物状态看起来也不错，确实令人期待。",
+)
+assert ambiguous_review is None
+
+# Unchanged command failures stop after two attempts instead of allowing weak
+# agents to burn time and tokens in a verify/render loop.
+repeat_manifest = {"history": [
+    {"stage": "verify", "input_digest": "same", "returncode": 1},
+    {"stage": "verify", "input_digest": "same", "returncode": 1},
+]}
+assert w.unchanged_failure_count(repeat_manifest, "verify", "same") == 2
+assert w.unchanged_failure_count(repeat_manifest, "verify", "changed") == 0
 contrast_input = {
     **safe_semantic_input,
     "view_id": "contrast::P01",

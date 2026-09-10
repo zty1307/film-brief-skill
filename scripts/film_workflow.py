@@ -109,6 +109,7 @@ STAGE_GUIDANCE = {
     "final_excerpt_review": [
         "审核最终清洗后展示文字本身，常规项只核对方面、局部立场和语义完整性；对象与跨作品字段仅在输入明确标记时填写",
         "常规保留项按 excerpt_segments 编号选择方面和立场证据，不抄原文、不写保留理由；只有候选均不适用时才填写逐字证据",
+        "cluster_claim_review_required=true 时，额外确认摘录可以直接放在观点标题下且无需补充推理；宽泛词、人物名单、物料或品牌动作本身不能代替标题主张",
         "target_review_required 时从 target_evidence_segments 选编号，并判断目标锚点与当前观点是否同属一个对象；标签、名单或综合盘点中的顺带出现不能通过",
         "work_consistency_review_required 时核对方面证据究竟评价哪部作品；展示段含购买、抽奖、关注、参与指令或观点前无关八卦时先重截",
         "片段可修复时先回看全文重截；归簇不当时先尝试重归簇或建立真实新簇，再考虑逐来源 drop",
@@ -895,12 +896,21 @@ def final_excerpt_review_template_payload(
             reviews[view_id].update({"work_consistency_passed": None, "work_consistency_evidence": ""})
         if item.get("promotion_markers"):
             reviews[view_id].update({"independent_opinion_passed": None, "opinion_evidence_candidate_index": None})
+        if item.get("cluster_claim_review_required"):
+            claim_candidates = [
+                int(value) for value in item.get("cluster_claim_candidate_indexes", [])
+                if str(value) in segments
+            ]
+            reviews[view_id].update({
+                "cluster_claim_passed": None,
+                "cluster_claim_evidence_candidate_index": claim_candidates[0] if claim_candidates else None,
+            })
     return {
         "scope": "current_period_final_excerpt_semantic_reviews",
         "_workflow": binding(workflow_id, inputs),
         "contract": {
-            "schema_version": 5,
-            "instruction": "只填写当前分片。脚本已预选方面、立场及证据编号；逐条核对后只改错误项，并填写 decision 与 self_contained。常规 keep 不写理由、不复制原文。目标复核须确认锚点和当前观点属于同一对象；仅在标签、名单或综合盘点中出现不得通过。跨作品复核须确认方面证据评价目标作品。含购买、抽奖、关注、参与指令或观点前无关八卦的展示段先重截。",
+            "schema_version": 6,
+            "instruction": "只填写当前分片。脚本已预选方面、立场及证据编号；逐条核对后只改错误项，并填写 decision 与 self_contained。常规 keep 不写理由、不复制原文。cluster_claim_review_required 时，确认摘录可直接支持 cluster_title，无需分析者补充推理；泛群像、泛竞争、泛特效、名单或物料不能代替具体主张。目标复核须确认锚点和当前观点属于同一对象；仅在标签、名单或综合盘点中出现不得通过。跨作品复核须确认方面证据评价目标作品。含购买、抽奖、关注、参与指令或观点前无关八卦的展示段先重截。",
             "full_source_lookup": "仅对需要重截、转簇或核对跨作品的项目按 source_id 回查 retained_sources.jsonl",
             "required_for_normal_keep": ["decision=keep", "aspect_evidence_candidate_index", "stance", "stance_evidence_candidate_index", "self_contained=true"],
             "exact_text_fallback": "候选均不适用时，才填写 aspect_evidence、stance_evidence、opinion_evidence 或 target_evidence 的逐字原文",
@@ -999,13 +1009,17 @@ def final_excerpt_review_is_filled(review: dict, input_item: dict | None = None)
                 return False
             if not api.promotion_evidence_is_independent(opinion_evidence):
                 return False
+        if input_item.get("cluster_claim_review_required"):
+            claim_evidence = selected_excerpt_evidence(review, input_item, "cluster_claim_evidence")
+            if review.get("cluster_claim_passed") is not True or not claim_evidence or claim_evidence not in excerpt:
+                return False
         return True
     if not clean(review.get("reason")):
         return False
     failed_checks = review.get("failed_checks")
     if not isinstance(failed_checks, list) or not failed_checks or review.get("reexcerpt_attempted") is not True:
         return False
-    if {clean(value) for value in failed_checks} & {"aspect", "stance"}:
+    if {clean(value) for value in failed_checks} & {"aspect", "stance", "cluster_claim"}:
         return review.get("reassignment_attempted") is True and bool(clean(review.get("reassignment_reason")))
     if "work_consistency" in {clean(value) for value in failed_checks}:
         return bool(clean(review.get("conflict_evidence")))
@@ -1130,6 +1144,7 @@ def record_stage(
     manifest.setdefault("stages", {})[stage] = stage_record
     manifest.setdefault("history", []).append({
         "stage": stage,
+        "input_digest": token,
         "returncode": result["returncode"],
         "finished_at": result["finished_at"],
         "elapsed_seconds": float(result.get("elapsed_seconds", 0.0)),
@@ -1894,12 +1909,43 @@ def command_status(args: argparse.Namespace) -> None:
         print(json.dumps(status_payload(workspace, manifest), ensure_ascii=False, indent=2))
 
 
+def unchanged_failure_count(manifest: dict, action: object, token: object) -> int:
+    """Count only consecutive failures for the exact same action input."""
+    action_value = clean(action)
+    token_value = clean(token)
+    count = 0
+    for event in reversed(manifest.get("history", [])):
+        if clean(event.get("stage")) != action_value or clean(event.get("input_digest")) != token_value:
+            break
+        if int(event.get("returncode", 0)) == 0:
+            break
+        count += 1
+    return count
+
+
 def advance_loop(workspace: Path, max_steps: int, workers: int, timeout: float) -> None:
     manifest = load_manifest(workspace)
     for _ in range(max(1, max_steps)):
         state = status_payload(workspace, manifest)
         if state.get("status") != "READY_TO_ADVANCE":
             print(json.dumps(state, ensure_ascii=False, indent=2))
+            return
+        action = clean(state.get("action"))
+        token = clean(state.get("input_digest"))
+        repeated_failures = unchanged_failure_count(manifest, action, token)
+        if repeated_failures >= 2:
+            blocked = {
+                **state,
+                "status": "BLOCKED",
+                "stage": "repeated_action_failure",
+                "message": "同一输入已连续执行失败两次，控制器停止无效重试；按最近失败报告修改评审文件或输入后再运行 advance",
+                "failed_action": action,
+                "unchanged_failure_count": repeated_failures,
+                "do_not_rerun_without_changes": True,
+            }
+            blocked.pop("action", None)
+            write_json(workspace / STATUS_NAME, blocked)
+            print(json.dumps(blocked, ensure_ascii=False, indent=2))
             return
         execute_action(workspace, manifest, state, workers, timeout)
         manifest = load_manifest(workspace)

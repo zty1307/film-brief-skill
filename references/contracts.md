@@ -229,17 +229,21 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
       "aspect_evidence_candidate_index": 1,
       "stance": "positive",
       "stance_evidence_candidate_index": 2,
-      "self_contained": true
+      "self_contained": true,
+      "cluster_claim_passed": true,
+      "cluster_claim_evidence_candidate_index": 1
     }
   }
 }
 ```
 
-该文件只包含脚本无法高置信确认的最终展示文字。脚本会依次尝试已选片段和后续候选，自动修复能够通过换候选解决的边界、标记、长度和引号问题。对于70—150字、句段完整、方面词与单一立场明确，且没有转折反向、对象不明、跨作品、促销或无关前缀风险的摘录，脚本直接生成可审计的保留决定，记录在 `excerpt_semantic_auto_accepted.jsonl`，不进入AI队列。其余项目每轮最多80条，同时把单批文件限制在90KB以内。每条将清洁摘录无损拆成按顺序编号的 `excerpt_segments`；只有短摘录、促销、对象或跨作品风险项才提供必要上下文。完整来源只在需要重截、转簇或核对时按 `source_id` 回查。
+该文件只包含脚本无法高置信确认的最终展示文字。脚本会依次尝试已选片段和后续候选，自动修复能够通过换候选解决的边界、标记、长度和引号问题。对于70—150字、句段完整，并且同一局部句段同时包含具体方面与单一立场、没有转折反向、对象不明、跨作品、促销或无关前缀风险的摘录，脚本直接生成可审计的保留决定。方面和态度分散在不同句段时仍可保留，但必须进入AI复核确认语义关系。`群像、竞争、白月光、特效、制作、质感` 等宽泛词可以召回候选，不能单独触发脚本自动通过。其余项目每轮最多80条，同时把单批文件限制在90KB以内。
 
 每条复核保留模板预填的 `review_fingerprint`。普通 `keep` 只填决定、方面证据编号、立场、立场证据编号和 `self_contained:true`，无需填写理由或复制原文。脚本按编号回填逐字证据；候选均不适用时才可填写不带 `_candidate_index` 的逐字原文字段。只修改少数摘录时，控制器按条目指纹保留其余未变化的已审结果。
 
 输入标记 `target_review_required:true` 时，模板另含 `target_relation_passed` 和预填的 `target_evidence_candidate_index`。目标证据必须来自 `target_evidence_segments`，并包含作品、节目、演员或角色锚点；通过仍要求该锚点与当前观点属于同一评价对象。目标只在标签、作品名单或综合盘点中出现时不得通过。输入标记 `work_consistency_review_required:true` 时，须确认方面证据评价目标作品，不能用另一作品的演员、角色或剧情支撑当前簇。`display_operational_promotion_markers` 或 `irrelevant_leading_segment_indexes` 非空时，当前展示段不能直接 keep，先在同一来源重截，确无合格片段再 drop。
+
+输入标记 `cluster_claim_review_required:true` 时，模板另含 `cluster_claim_passed` 和 `cluster_claim_evidence_candidate_index`。只有摘录能直接支持 `cluster_title`、无需分析者补充缺失推理时才能设为通过。该标记主要用于只命中宽泛路由词或成员很少的观点簇；它是复核触发器，不是删除规则。无法支持当前标题时先尝试重截、转入更合适的簇或修正有数据依据的簇名。
 
 清洁后的摘录优先为70—150字。短于70字时先回看全文，仍无法补足才填写短摘录例外和具体依据编号；具体依据须包含动作、台词、场景、数据或因果分析。作品标签、人物名及“好看、封神、绝了、笑点拉满、期待”等泛泛态度不算具体依据，批量复用同一个例外理由会被脚本拒绝。全文中没有可替换合格片段时使用 `decision:"drop"`。终审不设每簇样本数量规则。
 

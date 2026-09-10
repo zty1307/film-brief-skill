@@ -184,6 +184,11 @@ for _ in range(30):
                 "decision": "keep", "aspect_evidence_candidate_index": 1, "stance": "positive",
                 "stance_evidence_candidate_index": 1, "self_contained": True,
             }
+            if item.get("cluster_claim_review_required"):
+                template["reviews"][item["view_id"]].update({
+                    "cluster_claim_passed": True,
+                    "cluster_claim_evidence_candidate_index": 1,
+                })
             assert len(excerpt) >= 70
         dump(Path(state["required_file"]), template)
     else:
@@ -208,8 +213,9 @@ assert all("elapsed_seconds" in item for item in manifest["history"] if item["st
 cache_audit = load(WORKSPACE / "run" / "cluster_routing_cache_audit.json")
 assert cache_audit["hits"] >= 1 and cache_audit["misses"] == 0
 auto_semantic_rows = [json.loads(line) for line in (WORKSPACE / "run" / "excerpt_semantic_auto_accepted.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
-assert len(auto_semantic_rows) == 1
-assert (WORKSPACE / "run" / "excerpt_semantic_review_input.jsonl").read_text(encoding="utf-8").strip() == ""
+assert len(auto_semantic_rows) == 0
+semantic_input_rows = [json.loads(line) for line in (WORKSPACE / "run" / "excerpt_semantic_review_input.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+assert len(semantic_input_rows) == 1 and semantic_input_rows[0]["cluster_claim_review_required"] is True
 cluster_final_command = manifest["stages"]["cluster_final"]["command"]
 assert "--set-reviews" in cluster_final_command and "--member-reviews" not in cluster_final_command
 link_command = manifest["stages"]["link_check"]["command"]

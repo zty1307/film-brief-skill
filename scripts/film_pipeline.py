@@ -46,7 +46,7 @@ DRAMA_CLUSTER_SCOPES = {"pre_broadcast_expectation", "current_broadcast_reaction
 VARIETY_CLUSTER_SCOPES = {"latest_episode", "previous_episode_prominent", "program_level_current", "mixed_scope_explicit"}
 ALLOWED_DROP_FAILURE_CHECKS = {
     "target", "aspect", "stance", "self_contained", "work_consistency", "evidence_specificity",
-    "display_promotion", "excerpt_focus",
+    "display_promotion", "excerpt_focus", "cluster_claim",
 }
 CLUSTER_TITLE_PREDICATE = re.compile(
     r"^(?:肯定|认可|称赞|关注|讨论|质疑|批评|担忧|认为|看好|指出|反映|赞赏|期待|吐槽|不满|"
@@ -60,6 +60,12 @@ GENERIC_ROUTING_TERMS = {
     "影视", "电视剧", "电影", "剧集", "综艺", "节目", "作品", "武侠", "古装",
     "演员", "角色", "人物", "剧情", "内容", "表现", "热度", "关注", "讨论",
     "认为", "肯定", "认可", "期待", "看好", "质疑", "批评", "担忧", "吐槽",
+}
+# These words can retrieve a candidate, but alone they do not establish a
+# narrow report claim. AI may still keep the item after reading the relation.
+AMBIGUOUS_AUTO_ASPECT_TERMS = {
+    "群像", "竞争", "白月光", "特效", "制作", "阵容", "演技", "角色", "人物",
+    "表现", "热度", "口碑", "质感", "情怀", "联动", "物料", "话题", "市场",
 }
 BAD_EXCERPT_START = ("…", "...", "。", "，", "；", "：", "”", "’", "）", "】", ")", "]")
 BAD_EXCERPT_END = ("…", "...", "，", "、", "；", "：", "—", "-")
@@ -620,6 +626,14 @@ def semantic_review_fingerprint(item: dict) -> str:
             "irrelevant_leading_segment_indexes",
         )
     }
+    # Preserve earlier item fingerprints for unaffected reviews.  New claim
+    # fields participate only when the extra review is actually required.
+    if item.get("cluster_claim_review_required"):
+        payload.update({
+            "cluster_claim_review_required": True,
+            "cluster_claim_review_reasons": item.get("cluster_claim_review_reasons", []),
+            "cluster_claim_candidate_indexes": item.get("cluster_claim_candidate_indexes", []),
+        })
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -633,6 +647,7 @@ def deterministic_semantic_keep(input_item: dict, excerpt: str) -> dict | None:
     if (
         input_item.get("target_review_required")
         or input_item.get("work_consistency_review_required")
+        or input_item.get("cluster_claim_review_required")
         or input_item.get("short_excerpt")
         or input_item.get("promotion_markers")
         or input_item.get("display_operational_promotion_markers")
@@ -650,24 +665,33 @@ def deterministic_semantic_keep(input_item: dict, excerpt: str) -> dict | None:
         return None
     aspect_candidates = []
     stance_candidates = []
+    joint_candidates = []
+    concrete_aspect_hits = []
     for index, segment in (input_item.get("excerpt_segments") or {}).items():
         segment_text = clean(segment)
-        if any(term in segment_text for term in aspect_terms):
+        segment_aspects = [term for term in aspect_terms if term in segment_text]
+        if segment_aspects:
             aspect_candidates.append(str(index))
-        if (
+            concrete_aspect_hits.extend(
+                term for term in segment_aspects if term not in AMBIGUOUS_AUTO_ASPECT_TERMS
+            )
+        stance_supported = (
             not stance_evidence_conflicts(expected_stance, segment_text)
             and stance_evidence_supports(expected_stance, segment_text)
-        ):
+        )
+        if stance_supported:
             stance_candidates.append(str(index))
-    if not aspect_candidates or not stance_candidates:
+        if segment_aspects and stance_supported:
+            joint_candidates.append(str(index))
+    if not joint_candidates or not concrete_aspect_hits:
         return None
     return {
         "view_id": clean(input_item.get("view_id")),
         "review_fingerprint": clean(input_item.get("review_fingerprint")),
         "decision": "keep",
-        "aspect_evidence_candidate_index": int(aspect_candidates[0]),
+        "aspect_evidence_candidate_index": int(joint_candidates[0]),
         "stance": expected_stance,
-        "stance_evidence_candidate_index": int(stance_candidates[0]),
+        "stance_evidence_candidate_index": int(joint_candidates[0]),
         "self_contained": True,
         "review_basis": "script_high_confidence_semantic_gate",
     }
@@ -4008,6 +4032,19 @@ def command_render(args: argparse.Namespace) -> None:
                     int(index) for index, segment in excerpt_segments.items()
                     if any(term in segment for term in aspect_terms)
                 ]
+                matched_aspect_terms = list(dict.fromkeys(
+                    term for term in aspect_terms if term and term in excerpt
+                ))
+                concrete_aspect_terms = [
+                    term for term in matched_aspect_terms
+                    if term not in AMBIGUOUS_AUTO_ASPECT_TERMS
+                ]
+                cluster_claim_review_reasons = []
+                if matched_aspect_terms and not concrete_aspect_terms:
+                    cluster_claim_review_reasons.append("only_ambiguous_routing_terms")
+                if len(members) <= 2:
+                    cluster_claim_review_reasons.append("rare_cluster_requires_direct_support")
+                cluster_claim_review_required = bool(cluster_claim_review_reasons)
                 target_anchor_terms = list(dict.fromkeys(strong_terms + weak_terms + auxiliary_terms))
                 target_segments = target_evidence_segments(
                     row,
@@ -4042,11 +4079,15 @@ def command_render(args: argparse.Namespace) -> None:
                     "excerpt_segments": excerpt_segments,
                     "aspect_terms": aspect_terms,
                     "aspect_candidate_indexes": aspect_candidate_indexes,
+                    "matched_aspect_terms": matched_aspect_terms,
                     "promotion_markers": promotion_markers,
                     "excerpt_length": len(excerpt),
                     "short_excerpt": short_excerpt,
                     "target_review_required": target_review_required,
                     "work_consistency_review_required": bool(work_conflict_markers),
+                    "cluster_claim_review_required": cluster_claim_review_required,
+                    **({"cluster_claim_review_reasons": cluster_claim_review_reasons} if cluster_claim_review_required else {}),
+                    **({"cluster_claim_candidate_indexes": aspect_candidate_indexes} if cluster_claim_review_required else {}),
                     **({"target_anchor_terms": target_anchor_terms} if target_review_required else {}),
                     **({"target_evidence_segments": target_segments} if target_review_required else {}),
                     **({"target_context_flags": target_context_flags} if target_context_flags else {}),
@@ -4106,6 +4147,12 @@ def command_render(args: argparse.Namespace) -> None:
                             item_failures.append("立场证据没有实际表达观点簇要求的正面、客观或负面立场")
                         if aspect_terms and not any(term in aspect_evidence for term in aspect_terms):
                             item_failures.append("方面证据未命中该观点簇的任何具体方面词，需重截或重新归簇")
+                        if cluster_claim_review_required:
+                            claim_evidence = indexed_excerpt_evidence(semantic, semantic_input, "cluster_claim_evidence")
+                            if semantic.get("cluster_claim_passed") is not True:
+                                item_failures.append("宽泛路由词或少量观点簇须确认摘录能直接支持观点标题，无需分析者补充推理")
+                            if not claim_evidence or claim_evidence not in excerpt:
+                                item_failures.append("观点标题支持证据候选编号无效，且未提供最终摘录中的逐字证据")
                         if target_review_required:
                             target_evidence = indexed_target_evidence(semantic, semantic_input)
                             target_scope = " ".join(target_segments.values())
@@ -4150,7 +4197,7 @@ def command_render(args: argparse.Namespace) -> None:
                                 item_failures.append(f"drop 含未知 failed_checks：{invalid_checks}")
                         if semantic.get("reexcerpt_attempted") is not True:
                             item_failures.append("drop 前必须回看全文并确认 reexcerpt_attempted=true")
-                        if isinstance(failed_checks, list) and ({"aspect", "stance"} & set(failed_checks)):
+                        if isinstance(failed_checks, list) and ({"aspect", "stance", "cluster_claim"} & set(failed_checks)):
                             if semantic.get("reassignment_attempted") is not True:
                                 item_failures.append("方面或立场不匹配时，drop 前必须确认已尝试重新归簇")
                             if not clean(semantic.get("reassignment_reason")):
@@ -4323,13 +4370,14 @@ def command_render(args: argparse.Namespace) -> None:
     )
     write_json(run_dir / "final_excerpt_review_contract.json", {
         "scope": "current_period_final_excerpt_review_contract",
-        "instruction": "脚本已检查逐字位置、长度和清洁标记。AI按 excerpt_segments 顺序核对方面与立场。target_review_required 时，须确认目标锚点和当前观点确属同一对象；作品只在标签、名单或综合盘点中出现不能通过。work_consistency_review_required 时，须确认方面证据评价的是目标作品，不能把对比作品的演员、角色或剧情归给目标作品。展示段含购买、抽奖、关注、参与指令或观点前无关八卦时，先重截，无法重截再 drop。",
+        "instruction": "脚本已检查逐字位置、长度和清洁标记。AI按 excerpt_segments 顺序核对方面与立场。cluster_claim_review_required 时，摘录必须能直接放在 cluster_title 下且无需补充推理；泛群像、泛竞争、泛特效、名单和物料不能代替标题中的具体判断。target_review_required 时，须确认目标锚点和当前观点确属同一对象；作品只在标签、名单或综合盘点中出现不能通过。work_consistency_review_required 时，须确认方面证据评价的是目标作品。展示段含购买、抽奖、关注、参与指令或观点前无关八卦时，先重截，无法重截再 drop。",
         "allowed_decisions": ["keep", "drop"],
         "full_source_lookup_file": "retained_sources.jsonl",
         "evidence_scopes": {
             "aspect_evidence_candidate_index": "excerpt_segments",
             "stance_evidence_candidate_index": "excerpt_segments",
             "opinion_evidence_candidate_index": "excerpt_segments",
+            "cluster_claim_evidence_candidate_index": "excerpt_segments；仅在 cluster_claim_review_required 时填写",
             "exact_text_fallback": "仅当候选均不适用时，才填写对应的不带 _candidate_index 的逐字证据字段",
             "target_evidence_candidate_index": "target_evidence_segments；候选均不适用时才填写 target_evidence 逐字证据",
             "work_consistency_evidence_when_required": "raw_excerpt；若该字段省略则使用按序拼接的 excerpt_segments"
