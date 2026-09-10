@@ -33,7 +33,7 @@ If no period config exists, omit `--period-config` from both commands and fill t
 Follow `workflow_status.json` literally:
 
 - `READY_TO_ADVANCE`: run `advance` again.
-- `REVIEW_REQUIRED`: copy the stated template to `required_file`, preserve `_workflow`, and complete only the records in the current `input_file`. For source and final-excerpt review, the controller merges this small submission into a script-owned ledger; do not copy prior answers into the new submission. Run `advance` again to receive the next chunk. Never read all chunks up front. `cluster_discovery` is the sole exception: read its complete `input_files` seed before defining clusters. Use `full_input_file` only for auditing and `full_source_file` only when one item needs more context.
+- `REVIEW_REQUIRED`: the controller has already created the current editable submission at `required_file`. Read the current `input_file`, edit only the prefilled fields in `required_file`, save it, and run the exact `next_command`. Do not copy templates, inspect controller or pipeline source, create helper programs, or scan the run directory. The controller merges chunk submissions into its ledger. Never read all chunks up front. `cluster_discovery` is the sole exception: read its complete `input_files` seed before defining clusters. Use `full_input_file` only for auditing and `full_source_file` only when one item needs more context.
 - `BLOCKED` or `BROKEN`: fix the reported cause. Do not bypass the controller or invent another output.
 - `COMPLETE`: open the published HTML, visually inspect the period tabs, stance tabs, cluster titles, excerpts, links, scrolling, spacing, and counts, then deliver it.
 

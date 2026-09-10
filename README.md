@@ -35,7 +35,7 @@ $CODEX_HOME/skills/film-brief-cleaning/
 之后只反复运行 `advance`，并严格依据 `workflow_status.json` 行动：
 
 - `READY_TO_ADVANCE`：再次运行 `advance`。
-- `REVIEW_REQUIRED`：只读取当前 `input_file` 和 `review_requirements`，从 `template` 填写 `required_file`，原样保留 `_workflow`；再次运行 `advance` 后再处理下一片。初次观点发现阶段需要依次读取完整 `input_files`。
+- `REVIEW_REQUIRED`：控制器已把当前可填写提交写入 `required_file`。只读取当前 `input_file`，直接补全 `required_file` 的预留字段，保存后原样执行 `next_command`；不复制模板、不研究源码、不编写临时驱动脚本。初次观点发现阶段需要依次读取完整 `input_files`。
 - `BROKEN` / `BLOCKED`：按状态中的结构化诊断修复，不得跳过关口或复用旧运行的评审文件。
 - `COMPLETE`：机器验收通过；交付前仍需打开 HTML 做视觉检查。
 

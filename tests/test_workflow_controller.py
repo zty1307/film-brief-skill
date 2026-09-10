@@ -95,11 +95,18 @@ for _ in range(30):
         state = run("advance", "--workspace", str(WORKSPACE), "--timeout", "0.2")
         continue
     assert state["status"] == "REVIEW_REQUIRED" and state.get("review_requirements"), state
+    assert state.get("edit_file_ready") is True, state
+    assert Path(state["required_file"]).exists(), state
+    assert "template" not in state, state
+    operator = state.get("operator_contract") or {}
+    assert operator.get("mode") == "controller_prepared_edit_in_place", state
+    assert operator.get("write_only") == state["required_file"], state
+    assert any("临时驱动脚本" in value for value in operator.get("forbidden_in_normal_flow", [])), state
     if stage == "source_review":
         assert state.get("input_file") and state.get("full_input_file")
         assert state.get("full_source_file", "").endswith("normalized_sources.jsonl")
         assert state.get("chunk_index") == 1 and state.get("chunk_total") >= 1
-        template = load(Path(state["template"]))
+        template = load(Path(state["required_file"]))
         queue = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
         assert queue and "evidence_source_text" not in queue[0]
         assert "full_source_lookup" not in queue[0] and "review_evidence_candidates" in queue[0]
@@ -120,7 +127,7 @@ for _ in range(30):
         assert "body" not in discovery_rows[0] and "quality" not in discovery_rows[0]
         assert len(state["input_files"]) == 1
         assert state.get("full_source_file")
-        template = load(Path(state["template"]))
+        template = load(Path(state["required_file"]))
         template["batches"]["电视剧《测试剧》"] = [{
             "id": "P01",
             "title": "肯定演员细腻自然的表演，认为人物关系与情绪变化真实可信",
@@ -134,8 +141,7 @@ for _ in range(30):
         }]
         dump(Path(state["required_file"]), template)
     elif stage == "cluster_assignment_review":
-        template_path = Path(state.get("template", WORKSPACE / "review_templates" / "cluster_overrides.template.json"))
-        template = load(template_path)
+        template = load(Path(state["required_file"]))
         queue = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
         template["overrides"] = {
             item["source_id"]: {
@@ -146,7 +152,7 @@ for _ in range(30):
         }
         dump(Path(state["required_file"]), template)
     elif stage == "cluster_set_review":
-        template = load(Path(state["template"]))
+        template = load(Path(state["required_file"]))
         set_input = load(Path(state["input_files"][0]))
         count_input = load(Path(state["input_files"][1]))
         template["reviews"] = {}
@@ -170,7 +176,7 @@ for _ in range(30):
     elif stage == "final_excerpt_review":
         assert state.get("input_file") and state.get("full_input_file")
         assert state.get("chunk_index") == 1 and state.get("chunk_total") >= 1
-        template = load(Path(state["template"]))
+        template = load(Path(state["required_file"]))
         inputs = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
         template["reviews"] = {}
         for item in inputs:

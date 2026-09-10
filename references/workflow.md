@@ -2,7 +2,7 @@
 
 ## 统一执行入口
 
-生产运行只使用 `scripts/film_workflow.py` 建立独立工作区和推进流程。执行者不自行判断下一条底层命令；每次读取 `<独立工作区>/workflow_status.json`，只按其中唯一的 `stage`、`required_file` 和当前 `input_file` 完成当前语义任务，再运行 `advance`。来源复核每批最多60条，最终摘录复核每批最多80条且不超过90KB；控制器每轮只暴露下一片未完成内容，并把小份提交自动合并到脚本账本。不要复制历史答案或提前读取其他分片，`full_input_file` 仅供核对完整性。初次观点发现需要全局归纳，是唯一应依次读取全部 `input_files` 的阶段；控制器通常会把180条分层片段压成一个紧凑文件。模板中的 `_workflow` 绑定块必须原样保留。
+生产运行只使用 `scripts/film_workflow.py` 建立独立工作区和推进流程。执行者不自行判断下一条底层命令；每次读取 `<独立工作区>/workflow_status.json`，只按其中唯一的 `stage` 和 `operator_contract` 工作。控制器已经把当前提交写入 `required_file`：读取当前 `input_file`，直接补全 `required_file` 的预留字段，保存后原样运行 `next_command`。来源复核每批最多60条，最终摘录复核每批最多80条且不超过90KB；控制器每轮只暴露下一片未完成内容，并把小份提交自动合并到脚本账本。不要复制模板或历史答案，不要研究源码、编写临时驱动脚本、遍历运行产物或提前读取其他分片。`full_input_file` 仅供核对完整性。初次观点发现需要全局归纳，是唯一应依次读取全部 `input_files` 的阶段；控制器通常会把180条分层片段压成一个紧凑文件。`required_file` 中的 `_workflow` 绑定块必须原样保留。
 
 先通过 Codex 的 workspace dependencies 取得捆绑 Python 路径，避免调用 Windows Store 的同名占位程序。实战前用同一组路径运行 `doctor`；只有全部检查为 `PASS` 才执行 `init`。
 
