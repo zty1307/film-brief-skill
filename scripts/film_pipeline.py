@@ -129,6 +129,11 @@ DISPLAY_NORMALIZATION = "remove_social_markup_v3"
 EXCERPT_PREFERRED_MIN = 70
 EXCERPT_MAX = 150
 FINAL_REVIEW_CHUNK_SIZE = 80
+CLUSTER_ROUTING_CACHE_VERSION = 1
+AUTO_SEMANTIC_CONTRAST = re.compile(
+    r"虽然|尽管|但是|不过|然而|却|反而|可惜|遗憾|问题|争议|质疑|吐槽|批评|失望"
+)
+AUTO_SEMANTIC_COMPLETE_END = ("。", "！", "？", "!", "?", "”", "’", "）", ")", "】", "]")
 DISPLAY_MARKDOWN_LINK = re.compile(r"!?\[[^\]\r\n]{0,80}\]\((?:https?://|//)[^)\s]+\)", re.I)
 DISPLAY_RAW_URL = re.compile(r"(?:https?://|www\.)[^\s，。！？；]+", re.I)
 DISPLAY_HASHTAG_PAIR = re.compile(r"#[^#\s\r\n]{1,80}#")
@@ -617,6 +622,55 @@ def semantic_review_fingerprint(item: dict) -> str:
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def deterministic_semantic_keep(input_item: dict, excerpt: str) -> dict | None:
+    """Auto-approve only mechanically unambiguous, complete excerpts.
+
+    This is deliberately a narrow fast path.  Mixed, short, promotional,
+    cross-work, target-ambiguous, or contrastive passages still go to AI.
+    """
+    if (
+        input_item.get("target_review_required")
+        or input_item.get("work_consistency_review_required")
+        or input_item.get("short_excerpt")
+        or input_item.get("promotion_markers")
+        or input_item.get("display_operational_promotion_markers")
+        or input_item.get("irrelevant_leading_segment_indexes")
+        or len(excerpt) < EXCERPT_PREFERRED_MIN
+        or len(excerpt) > EXCERPT_MAX
+        or not excerpt.endswith(AUTO_SEMANTIC_COMPLETE_END)
+        or LEADING_FRAGMENT.search(excerpt)
+        or AUTO_SEMANTIC_CONTRAST.search(excerpt)
+    ):
+        return None
+    expected_stance = clean(input_item.get("cluster_stance"))
+    aspect_terms = [clean(term) for term in input_item.get("aspect_terms", []) if clean(term)]
+    if expected_stance not in ALLOWED_CLUSTER_STANCES or not aspect_terms:
+        return None
+    aspect_candidates = []
+    stance_candidates = []
+    for index, segment in (input_item.get("excerpt_segments") or {}).items():
+        segment_text = clean(segment)
+        if any(term in segment_text for term in aspect_terms):
+            aspect_candidates.append(str(index))
+        if (
+            not stance_evidence_conflicts(expected_stance, segment_text)
+            and stance_evidence_supports(expected_stance, segment_text)
+        ):
+            stance_candidates.append(str(index))
+    if not aspect_candidates or not stance_candidates:
+        return None
+    return {
+        "view_id": clean(input_item.get("view_id")),
+        "review_fingerprint": clean(input_item.get("review_fingerprint")),
+        "decision": "keep",
+        "aspect_evidence_candidate_index": int(aspect_candidates[0]),
+        "stance": expected_stance,
+        "stance_evidence_candidate_index": int(stance_candidates[0]),
+        "self_contained": True,
+        "review_basis": "script_high_confidence_semantic_gate",
+    }
 
 
 def short_excerpt_support_is_specific(excerpt: object, evidence: object) -> bool:
@@ -1863,6 +1917,22 @@ def discovery_seed(records: list[dict], source_rows: list[dict], limit_per_batch
     return sorted(output, key=lambda row: (row["batch"], row["source_id"]))
 
 
+def compact_discovery_handoff(records: list[dict]) -> list[dict]:
+    """Remove repeated lookup metadata while preserving every discovery passage."""
+    output = []
+    for row in records:
+        passages = [clean(item.get("text")) for item in row.get("discovery_passages", []) if clean(item.get("text"))]
+        output.append({
+            "source_id": clean(row.get("source_id")),
+            "batch": clean(row.get("batch")),
+            "channel": clean(row.get("channel")),
+            "title": clean(row.get("title"))[:160],
+            "source_stance": clean(row.get("source_stance")),
+            "passage": " ".join(passages),
+        })
+    return output
+
+
 def load_link_health(path: Path) -> dict[str, dict]:
     payload = load_json(path.resolve())
     if payload.get("scope") != "current_period_source_link_health":
@@ -2036,7 +2106,12 @@ def command_select(args: argparse.Namespace) -> None:
     write_jsonl(run_dir / "cluster_discovery_input.jsonl", discovery_records)
     discovery_seed_records = discovery_seed(discovery_records, kept)
     write_jsonl(run_dir / "cluster_discovery_seed_input.jsonl", discovery_seed_records)
-    discovery_chunks = write_jsonl_chunks(run_dir / "cluster_discovery_chunks", discovery_seed_records)
+    discovery_chunks = write_jsonl_chunks(
+        run_dir / "cluster_discovery_chunks",
+        compact_discovery_handoff(discovery_seed_records),
+        chunk_size=180,
+        max_bytes=150_000,
+    )
     write_json(run_dir / "source_decisions.final.json", {"decisions": [{"source_id": row["id"], "decision": row["decision"], "reason": row["decision_reason"], "basis": row["decision_basis"], "evidence": row.get("review_evidence", ""), "evidence_position": row.get("review_evidence_position")} for row in decided]})
     write_json(run_dir / "dedup_audit.json", {"copy_families": family_audit, "duplicates": duplicates, "medium_similarity_candidates": candidates})
     write_json(run_dir / "hard_exclusion_audit.json", {"exclusions": hard_exclusions})
@@ -2405,6 +2480,26 @@ def reviewed_window(
         "fragments": fragments,
         "positions": positions,
         "reviewed_fragments": True,
+    }
+
+
+def compact_payload_fingerprint(value: object) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def cluster_routing_cache_rows(path: Path) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    try:
+        rows = load_jsonl(path)
+    except (OSError, ValueError):
+        return {}
+    return {
+        clean(row.get("source_id")): row
+        for row in rows
+        if int(row.get("cache_version", 0)) == CLUSTER_ROUTING_CACHE_VERSION
+        and clean(row.get("source_id"))
     }
 
 
@@ -2844,6 +2939,18 @@ def command_cluster(args: argparse.Namespace) -> None:
     set_reviews = cluster_set_review_map(args.set_reviews)
     count_reviews = cluster_count_review_map(args.set_reviews)
     by_id = {batch: {str(item["id"]): item for item in values} for batch, values in definitions.items()}
+    routing_cache_path = run_dir / "cluster_routing_cache.jsonl"
+    routing_cache = cluster_routing_cache_rows(routing_cache_path)
+    batch_contracts = {
+        batch: compact_payload_fingerprint({
+            "definitions": values,
+            "target": config["targets"][batch],
+        })
+        for batch, values in definitions.items()
+    }
+    updated_routing_cache = []
+    routing_cache_hits = 0
+    routing_cache_misses = 0
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     low_confidence = []
     assignment_audit = []
@@ -2851,11 +2958,47 @@ def command_cluster(args: argparse.Namespace) -> None:
     for row in sources:
         batch_defs = definitions[row["batch"]]
         target_config = config["targets"][row["batch"]]
+        row_fingerprint = compact_payload_fingerprint({
+            "batch": row["batch"],
+            "title": row.get("title", ""),
+            "source_text": source_text(row),
+        })
+        cached = routing_cache.get(row["id"], {})
+        cached_scores = cached.get("scores") if (
+            clean(cached.get("row_fingerprint")) == row_fingerprint
+            and clean(cached.get("batch_contract")) == batch_contracts[row["batch"]]
+            and isinstance(cached.get("scores"), list)
+        ) else None
         scores = []
-        for definition in batch_defs:
-            window = best_window(row, definition, target_config=target_config)
-            scores.append((window["score"], definition, window))
+        if cached_scores:
+            try:
+                scores = [
+                    (
+                        float(item["score"]),
+                        by_id[row["batch"]][str(item["cluster_id"])],
+                        item["window"],
+                    )
+                    for item in cached_scores
+                ]
+                routing_cache_hits += 1
+            except (KeyError, TypeError, ValueError):
+                scores = []
+        if not scores:
+            for definition in batch_defs:
+                window = best_window(row, definition, target_config=target_config)
+                scores.append((window["score"], definition, window))
+            routing_cache_misses += 1
         scores.sort(key=lambda item: item[0], reverse=True)
+        updated_routing_cache.append({
+            "cache_version": CLUSTER_ROUTING_CACHE_VERSION,
+            "source_id": row["id"],
+            "row_fingerprint": row_fingerprint,
+            "batch_contract": batch_contracts[row["batch"]],
+            "scores": [
+                {"cluster_id": str(definition["id"]), "score": score, "window": window}
+                for score, definition, window in scores
+            ],
+        })
         override = overrides.get(row["id"], {})
         if override and not clean(override.get("reason")):
             raise ValueError(f"归簇修正缺少 reason：{row['id']}")
@@ -2888,7 +3031,15 @@ def command_cluster(args: argparse.Namespace) -> None:
         if primary_id not in by_id[row["batch"]]:
             raise ValueError(f"未知簇修正：{row['id']} -> {primary_id}")
         primary_def = by_id[row["batch"]][primary_id]
-        primary_window = reviewed_window(row, primary_def, override, target_config)
+        cached_primary_window = next(
+            (window for _score, definition, window in scores if str(definition["id"]) == primary_id),
+            None,
+        )
+        primary_window = (
+            cached_primary_window
+            if not override
+            else reviewed_window(row, primary_def, override, target_config)
+        )
         primary_alignment = passage_alignment(
             row, primary_window, primary_def, config["targets"][row["batch"]], override
         )
@@ -3141,6 +3292,14 @@ def command_cluster(args: argparse.Namespace) -> None:
         item for item in low_confidence
         if (item["source_id"], item["provisional_cluster"]) in selected_keys
     ]
+    write_jsonl(routing_cache_path, updated_routing_cache)
+    write_json(run_dir / "cluster_routing_cache_audit.json", {
+        "cache_version": CLUSTER_ROUTING_CACHE_VERSION,
+        "sources": len(sources),
+        "hits": routing_cache_hits,
+        "misses": routing_cache_misses,
+        "hit_rate": round(routing_cache_hits / len(sources), 4) if sources else 0.0,
+    })
     write_json(run_dir / "clustered_items.json", {"definitions": definitions, "items": selected})
     write_json(run_dir / "workbench_order_audit.json", {"random": False, "clusters": order_audit})
     write_json(run_dir / "cluster_assignment_audit.json", {"assignments": assignment_audit, "cluster_members": cluster_members})
@@ -3151,7 +3310,7 @@ def command_cluster(args: argparse.Namespace) -> None:
     write_json(run_dir / "cluster_count_review_input.json", {"scope": "current_period_cluster_count_review_input", "batches": count_review_input})
     write_jsonl(run_dir / "cluster_count_review_queue.unresolved.jsonl", count_review_queue)
     write_json(run_dir / "cluster_count_review_audit.json", count_review_audit)
-    summary = {"status": "CLUSTERED", "retained_sources": len(sources), "assignments": len(assignment_audit), "display_exclusions": len(cluster_exclusions), "workbench_items": len(selected), "unique_workbench_sources": len({item["source_id"] for item in selected}), "low_confidence_unresolved": len(low_confidence), "cluster_set_review_unresolved": len(set_review_queue), "cluster_count_review_unresolved": len(count_review_queue), "batches": dict(Counter(item["batch"] for item in selected))}
+    summary = {"status": "CLUSTERED", "retained_sources": len(sources), "assignments": len(assignment_audit), "display_exclusions": len(cluster_exclusions), "workbench_items": len(selected), "unique_workbench_sources": len({item["source_id"] for item in selected}), "low_confidence_unresolved": len(low_confidence), "cluster_set_review_unresolved": len(set_review_queue), "cluster_count_review_unresolved": len(count_review_queue), "routing_cache_hits": routing_cache_hits, "routing_cache_misses": routing_cache_misses, "batches": dict(Counter(item["batch"] for item in selected))}
     write_json(run_dir / "cluster_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
@@ -3234,6 +3393,67 @@ def excerpt_candidates(body: str, window: dict, definition: dict) -> list[dict]:
         item["positions"][0][0],
     ))
     return candidates
+
+
+def choose_valid_display_candidate(
+    body: str,
+    window: dict,
+    definition: dict,
+    review: dict | None,
+) -> dict:
+    """Prefer a valid reviewed excerpt, then fall back through script candidates."""
+    candidates = []
+    errors = []
+    if review:
+        try:
+            fragments = [str(value) for value in review.get("fragments", [])]
+            supplied_positions = review.get("positions")
+            positions = (
+                validate_fragment_positions(body, fragments, supplied_positions)
+                if supplied_positions else locate_fragments(body, fragments)
+            )
+            candidates.append({
+                "fragments": fragments,
+                "positions": positions,
+                "excerpt": " ".join(fragment.strip() for fragment in fragments),
+                "basis": "ai_verbatim_review",
+            })
+        except ValueError as exc:
+            errors.append(str(exc))
+    for candidate in excerpt_candidates(body, window, definition):
+        candidates.append({**candidate, "basis": "deterministic_extractive_candidate"})
+    seen = set()
+    for candidate in candidates:
+        try:
+            fragments = [str(value) for value in candidate.get("fragments", [])]
+            positions = validate_fragment_positions(body, fragments, candidate.get("positions", []))
+            raw_excerpt = " ".join(fragment.strip() for fragment in fragments)
+            key = tuple((position[0], position[1]) for position in positions)
+            if key in seen:
+                continue
+            seen.add(key)
+            excerpt = clean_display_excerpt(raw_excerpt)
+            if not excerpt:
+                raise ValueError("展示片段清除话题标签、平台表情、链接和账号标记后为空")
+            if display_excerpt_has_markup(excerpt):
+                raise ValueError("展示片段清理后仍含话题标签、平台表情、链接或账号标记")
+            if len(excerpt) > EXCERPT_MAX:
+                raise ValueError(f"展示片段超过 {EXCERPT_MAX} 字")
+            if excerpt.startswith(BAD_EXCERPT_START) or excerpt.endswith(BAD_EXCERPT_END):
+                raise ValueError("展示片段边界不完整")
+            if unbalanced_display_quotes(excerpt):
+                raise ValueError("展示片段引号不成对")
+            return {
+                "fragments": fragments,
+                "positions": positions,
+                "raw_excerpt": raw_excerpt,
+                "excerpt": excerpt,
+                "basis": candidate.get("basis", "deterministic_extractive_candidate"),
+                "fallback_from_invalid_review": bool(review) and candidate.get("basis") != "ai_verbatim_review",
+            }
+        except (ValueError, IndexError) as exc:
+            errors.append(str(exc))
+    raise ValueError("；".join(dict.fromkeys(errors)) or "没有可用的逐字展示片段")
 
 
 def locate_fragments(body: str, fragments: list[str]) -> list[list[int]]:
@@ -3707,6 +3927,7 @@ def command_render(args: argparse.Namespace) -> None:
     semantic_inputs = []
     semantic_pending = []
     semantic_rejected = []
+    semantic_auto_accepted = []
     failures = []
     preflight_failures = []
     drop_counts: Counter[tuple[str, str]] = Counter()
@@ -3729,28 +3950,14 @@ def command_render(args: argparse.Namespace) -> None:
                 excerpt = ""
                 try:
                     review = excerpt_reviews.get(view_id)
-                    if review:
-                        fragments = [str(value) for value in review.get("fragments", [])]
-                        supplied_positions = review.get("positions")
-                        positions = validate_fragment_positions(body, fragments, supplied_positions) if supplied_positions else locate_fragments(body, fragments)
-                        raw_excerpt = " ".join(fragment.strip() for fragment in fragments)
-                        basis = "ai_verbatim_review"
-                    else:
-                        candidate = excerpt_candidates(body, item["window"], definition)[0]
-                        fragments, positions, raw_excerpt = candidate["fragments"], candidate["positions"], candidate["excerpt"]
-                        basis = "deterministic_extractive_candidate"
-                    validate_fragment_positions(body, fragments, positions)
-                    excerpt = clean_display_excerpt(raw_excerpt)
-                    if not excerpt:
-                        raise ValueError("展示片段清除话题标签、平台表情、链接和账号标记后为空，需回看全文重截")
-                    if display_excerpt_has_markup(excerpt):
-                        raise ValueError("展示片段清理后仍含话题标签、平台表情、链接或账号标记")
-                    if len(excerpt) > EXCERPT_MAX:
-                        raise ValueError(f"展示片段超过 {EXCERPT_MAX} 字，需保留核心判断和具体依据后重截")
-                    if excerpt.startswith(BAD_EXCERPT_START) or excerpt.endswith(BAD_EXCERPT_END):
-                        raise ValueError("展示片段边界不完整，需回看全文重截")
-                    if unbalanced_display_quotes(excerpt):
-                        raise ValueError("展示片段引号不成对，需回看全文重截")
+                    chosen_excerpt = choose_valid_display_candidate(
+                        body, item["window"], definition, review,
+                    )
+                    fragments = chosen_excerpt["fragments"]
+                    positions = chosen_excerpt["positions"]
+                    raw_excerpt = chosen_excerpt["raw_excerpt"]
+                    excerpt = chosen_excerpt["excerpt"]
+                    basis = chosen_excerpt["basis"]
                 except (ValueError, IndexError) as exc:
                     failure = {
                         "view_id": view_id,
@@ -3852,8 +4059,20 @@ def command_render(args: argparse.Namespace) -> None:
                     semantic_input["context_before"] = body[context_start:positions[0][0]]
                     semantic_input["context_after"] = body[positions[-1][1]:context_end]
                 semantic_input["review_fingerprint"] = semantic_review_fingerprint(semantic_input)
-                semantic_inputs.append(semantic_input)
                 semantic = semantic_reviews.get(view_id)
+                if semantic is None:
+                    semantic = deterministic_semantic_keep(semantic_input, excerpt)
+                    if semantic is not None:
+                        semantic_auto_accepted.append({
+                            "view_id": view_id,
+                            "source_id": row["id"],
+                            "batch": batch,
+                            "cluster_id": str(definition["id"]),
+                            "review_fingerprint": semantic_input["review_fingerprint"],
+                            "basis": semantic["review_basis"],
+                        })
+                if semantic is None or clean(semantic.get("review_basis")) != "script_high_confidence_semantic_gate":
+                    semantic_inputs.append(semantic_input)
                 item_failures = []
                 if semantic is None:
                     semantic_pending.append(semantic_input)
@@ -3993,8 +4212,14 @@ def command_render(args: argparse.Namespace) -> None:
                     semantic_effective["work_consistency_basis"] = (
                         "ai_reviewed_comparison" if work_conflict_markers else "script_no_comparison_marker"
                     )
-                    final_alignment["aspect"] = {**final_alignment["aspect"], "passed": bool(aspect_evidence) and aspect_evidence in excerpt, "basis": "ai_final_excerpt_review", "review_evidence": aspect_evidence}
-                    final_alignment["stance"] = {**final_alignment["stance"], "passed": clean(semantic.get("stance")) == clean(definition["stance"]), "reviewed": clean(semantic.get("stance")), "basis": "independent_final_excerpt_semantic_review", "review_evidence": stance_evidence}
+                    semantic_basis = clean(semantic.get("review_basis"))
+                    alignment_basis = (
+                        "script_high_confidence_semantic_gate"
+                        if semantic_basis == "script_high_confidence_semantic_gate"
+                        else "ai_final_excerpt_review"
+                    )
+                    final_alignment["aspect"] = {**final_alignment["aspect"], "passed": bool(aspect_evidence) and aspect_evidence in excerpt, "basis": alignment_basis, "review_evidence": aspect_evidence}
+                    final_alignment["stance"] = {**final_alignment["stance"], "passed": clean(semantic.get("stance")) == clean(definition["stance"]), "reviewed": clean(semantic.get("stance")), "basis": alignment_basis, "review_evidence": stance_evidence}
 
                 staged_item = {"viewId": view_id, "sourceId": row["id"], "channel": row["channel"], "author": row["author"], "title": row["title"], "publishedAt": row["published"], "url": safe_url(row["url"]), "excerpt": excerpt, "body": body, "sourceStance": row.get("stance", ""), "clusterStance": definition["stance"], "mediaAuthority": {"subjectId": row.get("media_subject_id", ""), "subjectName": row.get("media_subject_name", ""), "accountAlias": row.get("media_account_alias", ""), "accountType": row.get("media_account_type", ""), "tier": row.get("media_authority_tier", "unclassified"), "rank": int(row.get("media_authority_rank", 0)), "basis": row.get("media_authority_basis", "")}, "linkHealth": row.get("link_health", {}), "alignment": final_alignment, "semanticReview": semantic_effective, "factWarning": row.get("fact_warning", ""), "excerptProvenance": {"fragments": fragments, "positions": positions, "basis": basis, "displayNormalization": DISPLAY_NORMALIZATION}, "excerptLengthReview": {"length": len(excerpt), "preferredMin": EXCERPT_PREFERRED_MIN, "max": EXCERPT_MAX, "exception": short_excerpt, "reason": "短摘录本身含可核验的具体依据" if short_excerpt and specific_support_evidence else "", "specificSupportPassed": bool(specific_support_evidence) if short_excerpt else True, "specificSupportEvidence": specific_support_evidence if short_excerpt else ""}}
                 staged_items.append(staged_item)
@@ -4110,11 +4335,15 @@ def command_render(args: argparse.Namespace) -> None:
             "work_consistency_evidence_when_required": "raw_excerpt；若该字段省略则使用按序拼接的 excerpt_segments"
         },
         "preferred_length": [EXCERPT_PREFERRED_MIN, EXCERPT_MAX],
+        "script_auto_accepted_items": len(semantic_auto_accepted),
+        "script_auto_accepted_file": "excerpt_semantic_auto_accepted.jsonl",
+        "ai_review_items": len(semantic_inputs),
         "chunk_size": FINAL_REVIEW_CHUNK_SIZE,
         "chunk_files": [str(path.relative_to(run_dir)) for path in final_review_chunks],
         "do_not_repeat_instruction_per_item": True,
     })
     write_jsonl(run_dir / "excerpt_semantic_review_input.jsonl", semantic_inputs)
+    write_jsonl(run_dir / "excerpt_semantic_auto_accepted.jsonl", semantic_auto_accepted)
     write_jsonl(run_dir / "excerpt_semantic_review_queue.unresolved.jsonl", semantic_pending)
     write_jsonl(run_dir / "excerpt_semantic_review_rejected.jsonl", semantic_rejected)
     write_json(run_dir / "cluster_display_coverage_audit.json", {"clusters": cluster_display_audit})
@@ -4127,7 +4356,7 @@ def command_render(args: argparse.Namespace) -> None:
     write_json(run_dir / "excerpt_preflight_failures.json", {"failures": preflight_failures})
     if failures:
         failure_stages = {clean(item.get("stage")) for item in failures}
-        summary = {"status": "REVIEW_REQUIRED", "stage": "post_excerpt_cluster_count_review" if failure_stages == {"post_excerpt_cluster_count_review"} else "render_repair", "staged_items": staged_dataset["total"], "accepted_items": dataset["total"], "reviewed_dropped_items": len(semantic_rejected), "failures": len(failures), "unreviewed_final_excerpts": len(semantic_pending), "post_excerpt_count_reviews_required": len(post_count_review_input), "output_not_replaced": str(args.output.resolve())}
+        summary = {"status": "REVIEW_REQUIRED", "stage": "post_excerpt_cluster_count_review" if failure_stages == {"post_excerpt_cluster_count_review"} else "render_repair", "staged_items": staged_dataset["total"], "accepted_items": dataset["total"], "script_auto_accepted_items": len(semantic_auto_accepted), "reviewed_dropped_items": len(semantic_rejected), "failures": len(failures), "unreviewed_final_excerpts": len(semantic_pending), "post_excerpt_count_reviews_required": len(post_count_review_input), "output_not_replaced": str(args.output.resolve())}
         write_json(run_dir / "render_summary.json", summary)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         raise SystemExit(1)
@@ -4136,7 +4365,7 @@ def command_render(args: argparse.Namespace) -> None:
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_html(dataset), encoding="utf-8")
-    summary = {"status": "RENDERED", "output": str(output), "items": dataset["total"], "reviewed_dropped_items": len(semantic_rejected), "unique_sources": len({item["sourceId"] for batch in dataset["batches"] for cluster in batch["clusters"] for item in cluster["items"]}), "clusters": {batch["name"]: batch["clusterCount"] for batch in dataset["batches"]}, "single_file_html": True}
+    summary = {"status": "RENDERED", "output": str(output), "items": dataset["total"], "script_auto_accepted_items": len(semantic_auto_accepted), "reviewed_dropped_items": len(semantic_rejected), "unique_sources": len({item["sourceId"] for batch in dataset["batches"] for cluster in batch["clusters"] for item in cluster["items"]}), "clusters": {batch["name"]: batch["clusterCount"] for batch in dataset["batches"]}, "single_file_html": True}
     write_json(run_dir / "render_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

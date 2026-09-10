@@ -116,8 +116,9 @@ for _ in range(30):
     elif stage == "cluster_discovery":
         assert state.get("input_files") and state.get("full_input_file")
         discovery_rows = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
-        assert discovery_rows and "discovery_passages" in discovery_rows[0]
+        assert discovery_rows and "passage" in discovery_rows[0]
         assert "body" not in discovery_rows[0] and "quality" not in discovery_rows[0]
+        assert len(state["input_files"]) == 1
         assert state.get("full_source_file")
         template = load(Path(state["template"]))
         template["batches"]["电视剧《测试剧》"] = [{
@@ -203,10 +204,17 @@ expected_stages = ["prepare", "link_check", "select", "cluster_base", "cluster_f
 history_stages = [item["stage"] for item in manifest["history"]]
 positions = [history_stages.index(stage) for stage in expected_stages]
 assert positions == sorted(positions), history_stages
+assert all("elapsed_seconds" in item for item in manifest["history"] if item["stage"] != "extract")
+cache_audit = load(WORKSPACE / "run" / "cluster_routing_cache_audit.json")
+assert cache_audit["hits"] >= 1 and cache_audit["misses"] == 0
+auto_semantic_rows = [json.loads(line) for line in (WORKSPACE / "run" / "excerpt_semantic_auto_accepted.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+assert len(auto_semantic_rows) == 1
+assert (WORKSPACE / "run" / "excerpt_semantic_review_input.jsonl").read_text(encoding="utf-8").strip() == ""
 cluster_final_command = manifest["stages"]["cluster_final"]["command"]
 assert "--set-reviews" in cluster_final_command and "--member-reviews" not in cluster_final_command
 link_command = manifest["stages"]["link_check"]["command"]
 assert str((WORKSPACE / "run" / "source_link_candidates.jsonl").resolve()) in link_command
+assert "--cache" in link_command
 assert str((WORKSPACE / "run" / "workbench.verified-candidate.html").resolve()) in manifest["stages"]["render_final"]["output_hashes"]
 assert str(OUTPUT.resolve()) in manifest["stages"]["verify"]["output_hashes"]
 assert str((WORKSPACE / "run" / "verification.json").resolve()) in manifest["stages"]["verify"]["output_hashes"]

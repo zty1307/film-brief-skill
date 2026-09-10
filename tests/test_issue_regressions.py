@@ -7,12 +7,14 @@ import json
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_PATH = REPO_ROOT / "scripts" / "film_pipeline.py"
 WORKFLOW_PATH = REPO_ROOT / "scripts" / "film_workflow.py"
+LINK_CHECKER_PATH = REPO_ROOT / "scripts" / "check_links.py"
 
 
 def load(name: str, path: Path):
@@ -25,6 +27,22 @@ def load(name: str, path: Path):
 
 p = load("film_pipeline_regression", PIPELINE_PATH)
 w = load("film_workflow_regression", WORKFLOW_PATH)
+l = load("film_link_checker_regression", LINK_CHECKER_PATH)
+
+
+cache_now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+assert l.fresh_cached_result({
+    "url": "https://example.com/a", "classification": "reachable",
+    "checked_at": (cache_now - timedelta(hours=2)).isoformat(),
+}, cache_now)
+assert l.fresh_cached_result({
+    "url": "https://example.com/a", "classification": "reachable",
+    "checked_at": (cache_now - timedelta(hours=80)).isoformat(),
+}, cache_now) is None
+assert l.fresh_cached_result({
+    "url": "https://example.com/a", "classification": "indeterminate",
+    "checked_at": cache_now.isoformat(),
+}, cache_now) is None
 
 
 # Public-account exports use a shorter schema than monitoring-system exports.
@@ -251,6 +269,9 @@ discovery = p.cluster_discovery_record(discovery_row, {
 assert len(discovery["discovery_passages"]) == 1 and "body" not in discovery
 discovery_passage = discovery["discovery_passages"][0]
 assert p.source_text(discovery_row)[discovery_passage["start"]:discovery_passage["end"]] == discovery_passage["text"]
+compact_discovery = p.compact_discovery_handoff([discovery])[0]
+assert compact_discovery["passage"] == discovery_passage["text"]
+assert "discovery_passages" not in compact_discovery and "full_text_lookup" not in compact_discovery
 
 # Final excerpt evidence choices are lossless and can be resolved by index.
 segment_source = "演员的眼神和停顿都很自然，人物关系也因此显得真实可信。"
@@ -660,8 +681,8 @@ preserved = w.cumulative_fingerprinted_review_payload(
 )
 assert set(preserved["reviews"]) == {"b"}
 
-# Deterministic excerpt-format errors are exposed before the model reviews the
-# whole final queue.
+# An invalid manual excerpt falls back to the next deterministic candidate,
+# avoiding a separate AI re-excerpt round when the script can repair it.
 preflight_root = Path(tempfile.mkdtemp(prefix="film-preflight-test-"))
 (preflight_root / "cluster_set_review_queue.unresolved.jsonl").write_text("", encoding="utf-8")
 (preflight_root / "cluster_count_review_queue.unresolved.jsonl").write_text("", encoding="utf-8")
@@ -691,8 +712,58 @@ try:
 except SystemExit as exc:
     assert exc.code == 1
 preflight = w.read_json(preflight_root / "excerpt_preflight_failures.json")
-assert preflight["failures"][0]["view_id"] == "bad::P01"
-assert preflight["failures"][0]["current_excerpt"].startswith("。")
+assert preflight["failures"] == []
+semantic_rows = w.read_jsonl(preflight_root / "excerpt_semantic_review_input.jsonl")
+assert semantic_rows[0]["view_id"] == "bad::P01"
+assert not "".join(semantic_rows[0]["excerpt_segments"].values()).startswith("。")
+
+# The fast semantic gate is intentionally narrow: a complete, single-stance,
+# aspect-bearing excerpt can pass, while contrastive wording still needs AI.
+safe_semantic_input = {
+    "view_id": "safe::P01",
+    "review_fingerprint": "safe-fp",
+    "cluster_stance": "positive",
+    "excerpt_segments": {"1": "演员通过眼神和停顿推进情绪，表演细腻自然，人物变化真实可信；面对不同角色时，语气、身段和节奏也有清楚区分，让人物关系显得鲜活而有层次，几场对手戏的情绪递进尤其扎实，人物前后的状态变化能够自然衔接。"},
+    "aspect_terms": ["表演", "眼神"],
+    "target_review_required": False,
+    "work_consistency_review_required": False,
+    "short_excerpt": False,
+    "promotion_markers": [],
+}
+safe_review = p.deterministic_semantic_keep(
+    safe_semantic_input,
+    "演员通过眼神和停顿推进情绪，表演细腻自然，人物变化真实可信；面对不同角色时，语气、身段和节奏也有清楚区分，让人物关系显得鲜活而有层次，几场对手戏的情绪递进尤其扎实，人物前后的状态变化能够自然衔接。",
+)
+assert safe_review and safe_review["decision"] == "keep"
+assert safe_review["review_basis"] == "script_high_confidence_semantic_gate"
+split_excerpt = (
+    "动作场面集中展示镜头调度、招式设计和实景之间的配合，"
+    "演员出招利落，整体观感流畅自然，几场对手戏的节奏也层层推进，"
+    "既保留了力量感，又让人物情绪清楚落地，确实让人看得很过瘾。"
+)
+split_review = p.deterministic_semantic_keep(
+    {
+        **safe_semantic_input,
+        "view_id": "split::P01",
+        "excerpt_segments": {
+            "1": "动作场面集中展示镜头调度、招式设计和实景之间的配合，",
+            "2": "演员出招利落，整体观感流畅自然，几场对手戏的节奏也层层推进，既保留了力量感，又让人物情绪清楚落地，确实让人看得很过瘾。",
+        },
+        "aspect_terms": ["镜头调度", "招式设计"],
+    },
+    split_excerpt,
+)
+assert split_review and split_review["aspect_evidence_candidate_index"] == 1
+assert split_review["stance_evidence_candidate_index"] == 2
+contrast_input = {
+    **safe_semantic_input,
+    "view_id": "contrast::P01",
+    "excerpt_segments": {"1": "演员表演虽然自然，但是剧情推进拖沓，整体仍然令人失望。"},
+}
+assert p.deterministic_semantic_keep(
+    contrast_input,
+    "演员表演虽然自然，但是剧情推进拖沓，整体仍然令人失望。",
+) is None
 
 # Weak-model chunk submissions are accumulated by the controller, so a model
 # never has to rewrite prior answers or the full review file.

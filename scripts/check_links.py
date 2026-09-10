@@ -17,6 +17,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 DEAD_CODES = {404, 410}
 MAX_REDIRECTS = 5
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36"
+CACHE_TTL_HOURS = {"reachable": 72, "confirmed_dead": 24, "blocked": 168, "invalid": 168}
 
 
 def clean(value: object) -> str:
@@ -58,6 +59,61 @@ def load_jsonl(path: Path) -> list[dict]:
                 if isinstance(value, dict):
                     rows.append(value)
     return rows
+
+
+def load_cache(path: Path | None) -> dict[str, dict]:
+    if path is None or not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if payload.get("scope") != "film_brief_link_health_cache":
+        return {}
+    return {
+        clean(item.get("url")): item
+        for item in payload.get("results", [])
+        if isinstance(item, dict) and clean(item.get("url"))
+    }
+
+
+def fresh_cached_result(item: dict, now_utc: datetime | None = None) -> dict | None:
+    # Never let a historical cache bypass the hard host block. The blocked
+    # result is regenerated locally by check_one without a network request.
+    if blocked_host(clean(item.get("url"))):
+        return None
+    classification = clean(item.get("classification"))
+    ttl_hours = CACHE_TTL_HOURS.get(classification)
+    if ttl_hours is None:
+        return None
+    try:
+        checked = datetime.fromisoformat(clean(item.get("checked_at")).replace("Z", "+00:00"))
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    now_value = now_utc or datetime.now(timezone.utc)
+    if (now_value - checked.astimezone(timezone.utc)).total_seconds() > ttl_hours * 3600:
+        return None
+    return {key: value for key, value in item.items() if key not in {"references", "cache_hit"}}
+
+
+def write_cache(path: Path | None, results: list[dict]) -> None:
+    if path is None:
+        return
+    payload = {
+        "scope": "film_brief_link_health_cache",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "results": [
+            {key: value for key, value in item.items() if key not in {"references", "cache_hit"}}
+            for item in results
+            if clean(item.get("classification")) in CACHE_TTL_HOURS
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 
 def extract_html_data(path: Path) -> dict:
@@ -159,6 +215,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--cache", type=Path)
     args = parser.parse_args()
 
     references: dict[str, list[dict]] = {}
@@ -171,7 +228,18 @@ def main() -> None:
                     "author": clean(row.get("author")), "channel": clean(row.get("channel")),
                 })
 
+    cached = load_cache(args.cache.resolve() if args.cache else None)
     results = []
+    pending_urls = []
+    for url in references:
+        cache_hit = fresh_cached_result(cached.get(url, {}))
+        if cache_hit is None:
+            pending_urls.append(url)
+            continue
+        cache_hit["references"] = references[url]
+        cache_hit["cache_hit"] = True
+        results.append(cache_hit)
+    cache_hits = len(results)
     progress_path = args.output.with_suffix(args.output.suffix + ".progress.json")
     started = time.monotonic()
 
@@ -190,7 +258,7 @@ def main() -> None:
 
     write_progress("RUNNING")
     with ThreadPoolExecutor(max_workers=max(1, min(args.workers, 16))) as pool:
-        futures = {pool.submit(check_one, url, args.timeout): url for url in references}
+        futures = {pool.submit(check_one, url, args.timeout): url for url in pending_urls}
         for future in as_completed(futures):
             try:
                 result = future.result()
@@ -211,12 +279,21 @@ def main() -> None:
         "policy": "Only confirmed HTTP 404 or 410 is a deletion gate; 401, 403, 429, 5xx, login walls, anti-bot responses, DNS errors and timeouts remain indeterminate.",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "counts": counts,
+        "cache_hits": cache_hits,
+        "cache_misses": len(pending_urls),
         "results": results,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    cache_output = {
+        url: fresh
+        for url, item in cached.items()
+        if (fresh := fresh_cached_result(item)) is not None
+    }
+    cache_output.update({clean(item.get("url")): item for item in results if clean(item.get("url"))})
+    write_cache(args.cache.resolve() if args.cache else None, list(cache_output.values()))
     write_progress("COMPLETE")
-    print(json.dumps({"urls": len(results), "counts": counts, "output": str(args.output.resolve())}, ensure_ascii=False, indent=2))
+    print(json.dumps({"urls": len(results), "counts": counts, "cache_hits": cache_hits, "cache_misses": len(pending_urls), "output": str(args.output.resolve())}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

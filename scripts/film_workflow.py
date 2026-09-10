@@ -335,6 +335,7 @@ def paths_for(manifest: dict) -> dict[str, Path]:
 
 
 def run_command(command: list[str], cwd: Path | None = None, allow_review_stop: bool = False) -> dict:
+    started = time.perf_counter()
     completed = subprocess.run(
         command,
         cwd=str(cwd) if cwd else None,
@@ -349,6 +350,7 @@ def run_command(command: list[str], cwd: Path | None = None, allow_review_stop: 
         "stdout": completed.stdout[-12000:],
         "stderr": completed.stderr[-12000:],
         "finished_at": now(),
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
     }
     structured = None
     for candidate in (completed.stdout.strip(), completed.stderr.strip()):
@@ -1120,6 +1122,7 @@ def record_stage(
         "returncode": result["returncode"],
         "finished_at": result["finished_at"],
         "command": result["command"],
+        "elapsed_seconds": float(result.get("elapsed_seconds", 0.0)),
         "output_hashes": {str(path): sha256(path) for path in outputs},
     }
     if result.get("output_sha256"):
@@ -1129,6 +1132,7 @@ def record_stage(
         "stage": stage,
         "returncode": result["returncode"],
         "finished_at": result["finished_at"],
+        "elapsed_seconds": float(result.get("elapsed_seconds", 0.0)),
     })
     manifest["history"] = manifest["history"][-80:]
     save_manifest(workspace, manifest)
@@ -1350,6 +1354,19 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             full_input_file=str(p["run"] / "cluster_discovery_input.jsonl"),
             full_source_file=str(p["run"] / "retained_sources.jsonl"), binding_issue=cluster_issue,
         )
+    try:
+        pipeline_api().validate_clusters(
+            cluster_payload,
+            {clean(item.get("batch")) for item in read_jsonl(cluster_discovery_input) if clean(item.get("batch"))},
+            read_json(p["config"]),
+        )
+    except ValueError as exc:
+        return result(
+            "REVIEW_REQUIRED", "cluster_definition_repair",
+            "观点簇定义未通过快速预检；修正当前定义后再推进，不执行全量归簇",
+            required_file=str(p["clusters"]), input_file=str(p["clusters"]),
+            validation_error=str(exc), full_source_file=str(p["run"] / "retained_sources.jsonl"),
+        )
 
     override_inputs = [p["run"] / "retained_sources.jsonl", p["clusters"]]
     override_template = p['templates'] / 'cluster_overrides.template.json'
@@ -1395,6 +1412,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         p["run"] / "cluster_count_review_input.json",
         p["run"] / "cluster_review_queue.jsonl",
         p["run"] / "cluster_exclusions.jsonl",
+        p["run"] / "cluster_routing_cache_audit.json",
     ]):
         return result("READY_TO_ADVANCE", "cluster_base", "观点簇定义已就绪，可以生成首次归簇和复核队列", action="cluster_base", input_digest=cluster_base_token)
 
@@ -1484,6 +1502,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         p["run"] / "cluster_count_review_queue.unresolved.jsonl",
         p["run"] / "workbench_order_audit.json",
         p["run"] / "cluster_exclusions.jsonl",
+        p["run"] / "cluster_routing_cache_audit.json",
     ]):
         return result("READY_TO_ADVANCE", "cluster_final", "簇级审查齐备，可以固化最终归簇并进入逐摘录语义复核", action="cluster_final", input_digest=cluster_final_token)
 
@@ -1532,6 +1551,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
     preflight_path = p["run"] / "excerpt_preflight_failures.json"
     if not stage_fresh(manifest, "render_probe", render_probe_token, [
         p["run"] / "excerpt_semantic_review_input.jsonl",
+        p["run"] / "excerpt_semantic_auto_accepted.jsonl",
         p["run"] / "final_excerpt_review_contract.json",
         preflight_path,
     ]):
@@ -1577,6 +1597,8 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         if clean(item.get("view_id"))
     }
     required_views = {clean(item.get("view_id")) for item in semantic_review_items}
+    if not required_views:
+        semantic_issue = ""
     semantic_ledger = cumulative_fingerprinted_review_payload(
         workflow_id, semantic_inputs, semantic_payload, p["semantic_ledger"], semantic_input_map,
     )
@@ -1754,11 +1776,13 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
         result = run_command(command, allow_review_stop=True)
         outputs = [p["source_validation"], p["link_candidates"]]
     elif action == "link_check":
+        link_cache = p["workspace"].parent / ".film-brief-cache" / "link_health.json"
         command = [
             sys.executable, str(LINK_CHECKER),
             "--input", str(p["link_candidates"]),
             "--output", str(p["run"] / "source_link_health.json"),
             "--workers", str(workers), "--timeout", str(timeout),
+            "--cache", str(link_cache),
         ]
         result = run_command(command)
         outputs = [p["run"] / "source_link_health.json"]
@@ -1801,6 +1825,7 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
                 p["run"] / "cluster_count_review_input.json",
                 p["run"] / "cluster_review_queue.jsonl",
                 p["run"] / "cluster_exclusions.jsonl",
+                p["run"] / "cluster_routing_cache_audit.json",
             ]
         else:
             outputs = [
@@ -1811,6 +1836,7 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
                 p["run"] / "cluster_count_review_queue.unresolved.jsonl",
                 p["run"] / "workbench_order_audit.json",
                 p["run"] / "cluster_exclusions.jsonl",
+                p["run"] / "cluster_routing_cache_audit.json",
             ]
     elif action in {"render_probe", "render_final"}:
         command = [sys.executable, str(PIPELINE), "render", "--run", str(p["run"]), "--output", str(p["staged_output"])]
@@ -1825,6 +1851,7 @@ def execute_action(workspace: Path, manifest: dict, state: dict, workers: int, t
             result["output_sha256"] = sha256(p["staged_output"])
         outputs = [
             p["run"] / "excerpt_semantic_review_input.jsonl",
+            p["run"] / "excerpt_semantic_auto_accepted.jsonl",
             p["run"] / "final_excerpt_review_contract.json",
             p["run"] / "excerpt_preflight_failures.json",
         ]
