@@ -475,6 +475,8 @@ conditional_input = {
     "review_fingerprint": "fp-2",
     "excerpt_segments": {"1": "《测试剧》表演自然。"},
     "target_review_required": True,
+    "target_anchor_terms": ["《测试剧》", "测试剧", "测试演员"],
+    "target_evidence_segments": {"1": "《测试剧》由测试演员主演。"},
     "work_consistency_review_required": True,
 }
 conditional_review = conditional_template["reviews"]["conditional::P01"]
@@ -484,10 +486,18 @@ conditional_review.update({
 })
 assert not w.final_excerpt_review_is_filled(conditional_review, conditional_input)
 conditional_review.update({
-    "target_passed": True, "target_evidence": "《测试剧》",
+    "target_relation_passed": True, "target_evidence_candidate_index": 1,
     "work_consistency_passed": True, "work_consistency_evidence": "《测试剧》",
 })
 assert w.final_excerpt_review_is_filled(conditional_review, conditional_input)
+bad_target_review = dict(conditional_review, target_evidence="表演自然", target_evidence_candidate_index=None)
+assert not w.final_excerpt_review_is_filled(bad_target_review, conditional_input), "任意原文不得冒充目标作品证据"
+roundup_template = w.final_excerpt_review_template_payload("wf", [], [{
+    **conditional_input,
+    "view_id": "roundup::P01",
+    "target_context_flags": ["multi_work_roundup"],
+}])
+assert roundup_template["reviews"]["roundup::P01"]["target_evidence_candidate_index"] is None
 
 # Deterministic semantic mistakes are rejected in the current chunk instead of
 # accumulating until a large render-repair loop at the end of the run.
@@ -532,6 +542,57 @@ promo_review = {
 }
 assert not w.final_excerpt_review_is_filled(promo_review, promo_input)
 
+display_promo_input = {
+    "view_id": "display-promo::P01", "review_fingerprint": "fp-display-promo",
+    "cluster_stance": "positive", "aspect_terms": ["演技"],
+    "excerpt_segments": {"1": "演员演技细腻，人物成长可信。转发抽十个月卡。"},
+    "display_operational_promotion_markers": ["转发抽"],
+}
+display_promo_review = {
+    "review_fingerprint": "fp-display-promo", "decision": "keep",
+    "aspect_evidence_candidate_index": 1, "stance": "positive",
+    "stance_evidence_candidate_index": 1, "self_contained": True,
+}
+assert not w.final_excerpt_review_is_filled(display_promo_review, display_promo_input), "展示段不得夹带促销操作语"
+
+focus_input = {
+    "view_id": "focus::N01", "review_fingerprint": "fp-focus",
+    "cluster_stance": "negative", "aspect_terms": ["翻车"],
+    "excerpt_segments": {"1": "另一位演员的闪婚传闻被迅速辟谣。", "2": "《测试剧》前期声量很高，", "3": "观众担心播出后翻车。"},
+    "irrelevant_leading_segment_indexes": [1],
+}
+focus_review = {
+    "review_fingerprint": "fp-focus", "decision": "keep",
+    "aspect_evidence_candidate_index": 3, "stance": "negative",
+    "stance_evidence_candidate_index": 3, "self_contained": True,
+}
+assert not w.final_excerpt_review_is_filled(focus_review, focus_input), "观点前无关八卦必须先重截"
+
+assert not p.cluster_is_schedule_note({"stance": "positive", "title": "认可开播前公布的歌曲增强江湖氛围", "summary": "观众称赞配乐"})
+assert p.cluster_is_schedule_note({"stance": "objective", "title": "关注定档开播与平台排播安排", "summary": "记录播出时间"})
+assert "竞品剧" in p.role_related_other_work_titles(
+    "《竞品剧》汇聚多位实力派，演员饰演的角色值得期待。稍后《测试剧》开播。",
+    {"strong_terms": ["《测试剧》", "测试剧"]},
+)
+assert p.unrelated_leading_segment_indexes(
+    {"1": "另一位演员的闪婚消息刚被辟谣。", "2": "《测试剧》预约量很高，", "3": "观众担心播出后翻车。"},
+    ["《测试剧》", "测试剧"], ["翻车"],
+) == [1]
+
+
+# Candidate ranking prefers a clean, specific opinion over a longer excerpt
+# padded with follow/lottery instructions.
+promo_body = "转发抽十个月卡，点击链接参与活动。《测试剧》的演员用眼神和停顿推进情绪，人物成长自然可信。"
+promo_window = {
+    "start": 0, "end": len(promo_body), "text": promo_body,
+    "fragments": [promo_body], "positions": [[0, len(promo_body)]], "reviewed_fragments": True,
+}
+promo_candidate = p.excerpt_candidates(promo_body, promo_window, {
+    "id": "P01", "title": "肯定演员演技细腻，人物成长自然可信",
+    "stance": "positive", "required_any": ["演技", "人物成长"],
+})[0]
+assert not p.display_operational_promotion_markers(promo_candidate["excerpt"])
+assert "眼神和停顿" in promo_candidate["excerpt"]
 # Short-excerpt exceptions need concrete support, not a generic praise line.
 assert not p.short_excerpt_support_is_specific("《赴山海》打戏太好看了！", "打戏太好看了")
 assert p.short_excerpt_support_is_specific(

@@ -239,6 +239,8 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 
 每条复核保留模板预填的 `review_fingerprint`。普通 `keep` 只填决定、方面证据编号、立场、立场证据编号和 `self_contained:true`，无需填写理由或复制原文。脚本按编号回填逐字证据；候选均不适用时才可填写不带 `_candidate_index` 的逐字原文字段。只修改少数摘录时，控制器按条目指纹保留其余未变化的已审结果。
 
+输入标记 `target_review_required:true` 时，模板另含 `target_relation_passed` 和预填的 `target_evidence_candidate_index`。目标证据必须来自 `target_evidence_segments`，并包含作品、节目、演员或角色锚点；通过仍要求该锚点与当前观点属于同一评价对象。目标只在标签、作品名单或综合盘点中出现时不得通过。输入标记 `work_consistency_review_required:true` 时，须确认方面证据评价目标作品，不能用另一作品的演员、角色或剧情支撑当前簇。`display_operational_promotion_markers` 或 `irrelevant_leading_segment_indexes` 非空时，当前展示段不能直接 keep，先在同一来源重截，确无合格片段再 drop。
+
 清洁后的摘录优先为70—150字。短于70字时先回看全文，仍无法补足才填写短摘录例外和具体依据编号；具体依据须包含动作、台词、场景、数据或因果分析。作品标签、人物名及“好看、封神、绝了、笑点拉满、期待”等泛泛态度不算具体依据，批量复用同一个例外理由会被脚本拒绝。全文中没有可替换合格片段时使用 `decision:"drop"`。终审不设每簇样本数量规则。
 
 若终审 drop 使实际非空簇数变化，控制器要求 `post_excerpt_cluster_count_reviews.json`。模板已预填当前指纹；AI只填写 `decision:"pass"`、空 `issues` 和具体理由，9—16以外另填 `exception_reason`。实际簇数与范围由脚本计算，不要求AI重复填写。

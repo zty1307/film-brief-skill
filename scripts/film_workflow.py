@@ -109,6 +109,8 @@ STAGE_GUIDANCE = {
     "final_excerpt_review": [
         "审核最终清洗后展示文字本身，常规项只核对方面、局部立场和语义完整性；对象与跨作品字段仅在输入明确标记时填写",
         "常规保留项按 excerpt_segments 编号选择方面和立场证据，不抄原文、不写保留理由；只有候选均不适用时才填写逐字证据",
+        "target_review_required 时从 target_evidence_segments 选编号，并判断目标锚点与当前观点是否同属一个对象；标签、名单或综合盘点中的顺带出现不能通过",
+        "work_consistency_review_required 时核对方面证据究竟评价哪部作品；展示段含购买、抽奖、关注、参与指令或观点前无关八卦时先重截",
         "片段可修复时先回看全文重截；归簇不当时先尝试重归簇或建立真实新簇，再考虑逐来源 drop",
         "不得用文章整体立场否定其中可独立成立的局部观点，也不得为了缩量删除合格独立表达",
     ],
@@ -881,7 +883,12 @@ def final_excerpt_review_template_payload(
             "self_contained": None,
         }
         if item.get("target_review_required"):
-            reviews[view_id].update({"target_passed": None, "target_evidence": ""})
+            target_candidates = item.get("target_evidence_segments") or {}
+            target_is_roundup = "multi_work_roundup" in set(item.get("target_context_flags") or [])
+            reviews[view_id].update({
+                "target_relation_passed": None,
+                "target_evidence_candidate_index": 1 if "1" in target_candidates and not target_is_roundup else None,
+            })
         if item.get("work_consistency_review_required"):
             reviews[view_id].update({"work_consistency_passed": None, "work_consistency_evidence": ""})
         if item.get("promotion_markers"):
@@ -890,11 +897,11 @@ def final_excerpt_review_template_payload(
         "scope": "current_period_final_excerpt_semantic_reviews",
         "_workflow": binding(workflow_id, inputs),
         "contract": {
-            "schema_version": 4,
-            "instruction": "只填写当前分片。脚本已预选方面、立场及证据编号；逐条核对后只改错误项，并填写 decision 与 self_contained。常规 keep 不写理由、不复制原文",
+            "schema_version": 5,
+            "instruction": "只填写当前分片。脚本已预选方面、立场及证据编号；逐条核对后只改错误项，并填写 decision 与 self_contained。常规 keep 不写理由、不复制原文。目标复核须确认锚点和当前观点属于同一对象；仅在标签、名单或综合盘点中出现不得通过。跨作品复核须确认方面证据评价目标作品。含购买、抽奖、关注、参与指令或观点前无关八卦的展示段先重截。",
             "full_source_lookup": "仅对需要重截、转簇或核对跨作品的项目按 source_id 回查 retained_sources.jsonl",
             "required_for_normal_keep": ["decision=keep", "aspect_evidence_candidate_index", "stance", "stance_evidence_candidate_index", "self_contained=true"],
-            "exact_text_fallback": "候选均不适用时，才填写 aspect_evidence、stance_evidence 或 opinion_evidence 的逐字原文",
+            "exact_text_fallback": "候选均不适用时，才填写 aspect_evidence、stance_evidence、opinion_evidence 或 target_evidence 的逐字原文",
             "script_owned": ["target when target_review_required=false", "work consistency when work_consistency_review_required=false", "length", "markup", "verbatim positions"],
             "drop_fields": ["reason", "failed_checks", "reexcerpt_attempted", "reassignment_attempted when aspect or stance fails", "reassignment_reason", "conflict_evidence when work consistency fails"],
         },
@@ -956,13 +963,24 @@ def final_excerpt_review_is_filled(review: dict, input_item: dict | None = None)
         aspect_terms = [clean(value) for value in input_item.get("aspect_terms", []) if clean(value)]
         if aspect_terms and not any(term in aspect_evidence for term in aspect_terms):
             return False
+        if input_item.get("display_operational_promotion_markers"):
+            return False
+        if input_item.get("irrelevant_leading_segment_indexes"):
+            return False
         if input_item.get("target_review_required") and (
-            review.get("target_passed") is not True or not clean(review.get("target_evidence"))
+            review.get("target_relation_passed") is not True
         ):
             return False
+        api = pipeline_api()
+        if input_item.get("target_review_required"):
+            target_evidence = api.indexed_target_evidence(review, input_item)
+            target_scope = " ".join(clean(value) for value in (input_item.get("target_evidence_segments") or {}).values())
+            target_terms = [clean(value) for value in input_item.get("target_anchor_terms", []) if clean(value)]
+            if not target_evidence or target_evidence not in target_scope:
+                return False
+            if target_terms and not any(term in target_evidence for term in target_terms):
+                return False
         raw_excerpt = clean(input_item.get("raw_excerpt")) or excerpt
-        if input_item.get("target_review_required") and clean(review.get("target_evidence")) not in raw_excerpt:
-            return False
         if input_item.get("work_consistency_review_required") and (
             review.get("work_consistency_passed") is not True or not clean(review.get("work_consistency_evidence"))
         ):

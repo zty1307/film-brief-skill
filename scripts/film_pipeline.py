@@ -45,7 +45,8 @@ ALLOWED_OBJECTIVE_SUBTYPES = {"neutral_fact", "sentiment_distribution", "balance
 DRAMA_CLUSTER_SCOPES = {"pre_broadcast_expectation", "current_broadcast_reaction", "later_reputation", "mixed_time_explicit"}
 VARIETY_CLUSTER_SCOPES = {"latest_episode", "previous_episode_prominent", "program_level_current", "mixed_scope_explicit"}
 ALLOWED_DROP_FAILURE_CHECKS = {
-    "target", "aspect", "stance", "self_contained", "work_consistency", "evidence_specificity"
+    "target", "aspect", "stance", "self_contained", "work_consistency", "evidence_specificity",
+    "display_promotion", "excerpt_focus",
 }
 CLUSTER_TITLE_PREDICATE = re.compile(
     r"^(?:肯定|认可|称赞|关注|讨论|质疑|批评|担忧|认为|看好|指出|反映|赞赏|期待|吐槽|不满|"
@@ -157,6 +158,16 @@ PROMOTION_DIRECT_CTA = re.compile(
     r"关注\s*[+＋和与]?\s*转发|转发|抽\s*\d|扫码|点击|领取|免费获得|请.{0,12}查收|"
     r"锁定.{0,18}(?:平台|频道|开播|播出)|前来打卡|加入.{0,12}(?:旅程|活动)|邀你|一起共赴|"
     r"角色表白|表白活动|热度值加成|签到|解锁|下单|购买|评论区|盖楼|冲刺"
+)
+DISPLAY_OPERATIONAL_CTA = re.compile(
+    r"点击(?:蓝字|链接|图片|阅读原文)|关注(?:我们|公众号|账号)|"
+    r"转发.{0,10}(?:抽|参与|赢)|抽\s*\d|扫码|"
+    r"(?:立即|即刻|赶快|快来|速来).{0,12}(?:下单|购买|打卡|参与|领取)|"
+    r"购买攻略|按需购买|买\s*\d+\s*(?:箱|件|份|套)|售完即止|限量发售|"
+    r"领取(?:福利|奖品)|免费获得|评论区盖楼|主攻.{0,8}站内|全力冲刺"
+)
+UNRELATED_LEADING_TOPIC = re.compile(
+    r"闪婚|恋情|绯闻|婚变|离婚|辟谣|造谣|狗仔|婚讯|分手"
 )
 AI_GENERATED_DISCLOSURE = re.compile(
     r"(?:本文|本篇|该文|文章|内容).{0,12}(?:由|使用|借助|经).{0,10}(?:AI|人工智能|ChatGPT|GPT).{0,16}(?:生成|创作|撰写|改写|润色)",
@@ -303,6 +314,11 @@ def promotion_evidence_is_independent(value: object) -> bool:
             text,
         )
     )
+
+
+def display_operational_promotion_markers(value: object) -> list[str]:
+    """Return direct actions that must not remain in a published excerpt."""
+    return list(dict.fromkeys(match.group(0) for match in DISPLAY_OPERATIONAL_CTA.finditer(clean(value))))
 
 
 def normalized(value: object) -> str:
@@ -594,7 +610,9 @@ def semantic_review_fingerprint(item: dict) -> str:
             "excerpt_segments", "aspect_terms", "aspect_candidate_indexes",
             "promotion_markers", "short_excerpt",
             "target_review_required", "work_consistency_review_required",
-            "work_conflict_markers",
+            "work_conflict_markers", "target_anchor_terms", "target_evidence_segments",
+            "target_context_flags", "display_operational_promotion_markers",
+            "irrelevant_leading_segment_indexes",
         )
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -659,6 +677,19 @@ def indexed_excerpt_evidence(review: dict, input_item: dict, field: str) -> str:
         return ""
     if isinstance(index, int) or (isinstance(index, str) and index.isdigit()):
         return clean((input_item.get("excerpt_segments") or {}).get(str(index)))
+    return ""
+
+
+def indexed_target_evidence(review: dict, input_item: dict) -> str:
+    """Resolve a target-attribution snippet from the script-built evidence menu."""
+    direct = clean(review.get("target_evidence"))
+    if direct:
+        return direct
+    index = review.get("target_evidence_candidate_index")
+    if isinstance(index, bool):
+        return ""
+    if isinstance(index, int) or (isinstance(index, str) and index.isdigit()):
+        return clean((input_item.get("target_evidence_segments") or {}).get(str(index)))
     return ""
 
 
@@ -830,6 +861,23 @@ def other_work_titles(text: object, target: dict) -> list[str]:
         if clean(value) in source and clean(value) not in output:
             output.append(clean(value))
     return output
+
+
+def role_related_other_work_titles(text: object, target: dict) -> list[str]:
+    """Route explicit other-work cast or character clauses to attribution review."""
+    strong, weak, _, _ = target_layers(target)
+    target_keys = [normalized(value) for value in strong + weak if normalized(value)]
+    source = clean(text)
+    output = []
+    for match in re.finditer(r"《([^》]{1,40})》", source):
+        title = match.group(1)
+        key = normalized(title)
+        if not key or any(key == target_key or key in target_key or target_key in key for target_key in target_keys):
+            continue
+        clause = source[match.end():min(len(source), match.end() + 90)]
+        if re.search(r"(?:汇聚|集结|领衔|主演|饰演|扮演).{0,60}(?:演员|角色|男主|女主|人物|实力派)?", clause):
+            output.append(title)
+    return list(dict.fromkeys(output))
 
 
 def term_hits(text: str, terms: list[str]) -> list[str]:
@@ -2040,6 +2088,63 @@ def sentence_spans(body: str) -> list[dict]:
     return spans or ([{"start": 0, "end": len(body), "text": body}] if body else [])
 
 
+def target_evidence_segments(row: dict, body: str, target: dict, local_context: str) -> dict[str, str]:
+    """Build a small exact-text menu for target attribution without sending the full source."""
+    strong, weak, auxiliary, _ = target_layers(target)
+    anchors = [term for term in strong + weak + auxiliary if term]
+    candidates: list[str] = []
+
+    def add(value: object) -> None:
+        text = clean(value)
+        if not text or not any(term in text for term in anchors):
+            return
+        if len(text) > 120:
+            hit_positions = [text.find(term) for term in anchors if term in text]
+            center = min(position for position in hit_positions if position >= 0)
+            start = max(0, center - 45)
+            text = text[start:start + 120]
+        key = normalized(text)
+        if not key:
+            return
+        for index, existing in enumerate(candidates):
+            existing_key = normalized(existing)
+            if key in existing_key or existing_key in key:
+                if len(text) < len(existing):
+                    candidates[index] = text
+                return
+        candidates.append(text)
+
+    add(row.get("title"))
+    for span in sentence_spans(local_context):
+        add(span.get("text"))
+    if len(candidates) < 2:
+        for span in sentence_spans(body):
+            add(span.get("text"))
+            if len(candidates) >= 2:
+                break
+    return {str(index): value for index, value in enumerate(candidates[:2], start=1)}
+
+
+def unrelated_leading_segment_indexes(
+    segments: dict[str, str], target_terms: list[str], aspect_terms: list[str]
+) -> list[int]:
+    """Find clearly unrelated gossip before the first target/aspect-bearing segment."""
+    ordered = [(int(index), clean(value)) for index, value in segments.items() if str(index).isdigit()]
+    relevant = [
+        index for index, text in ordered
+        if any(term and term in text for term in target_terms + aspect_terms)
+    ]
+    if not relevant:
+        return []
+    first_relevant = min(relevant)
+    return [
+        index for index, text in ordered
+        if index < first_relevant
+        and UNRELATED_LEADING_TOPIC.search(text)
+        and not any(term and term in text for term in target_terms + aspect_terms)
+    ]
+
+
 def keyword_pairs(definition: dict) -> list[tuple[str, float]]:
     result = []
     for item in definition.get("keywords", []):
@@ -2464,6 +2569,8 @@ def representative_cluster_members(items: list[dict], limit: int = 8) -> list[di
 
 
 def cluster_is_schedule_note(definition: dict) -> bool:
+    if clean(definition.get("stance")) != "objective":
+        return False
     text = " ".join(clean(definition.get(key)) for key in ("title", "summary"))
     return bool(
         re.search(r"定档|开播|排播|接档|同步更新|播出时间|追剧日历", text)
@@ -3080,6 +3187,7 @@ def excerpt_candidates(body: str, window: dict, definition: dict) -> list[dict]:
                 "score": round(cluster_value, 3),
                 "reviewed_passage": True,
                 "display_length": reviewed_display_length,
+                "display_operational_promotion": bool(display_operational_promotion_markers(reviewed_excerpt)),
                 "protect_reviewed_selection": bool(
                     len(reviewed_positions) == 2 and reviewed_positions[0][1] < reviewed_positions[1][0]
                 ),
@@ -3103,7 +3211,14 @@ def excerpt_candidates(body: str, window: dict, definition: dict) -> list[dict]:
             length_bonus = min(display_length, EXCERPT_PREFERRED_MIN) / 20
             if display_length < EXCERPT_PREFERRED_MIN:
                 length_bonus -= (EXCERPT_PREFERRED_MIN - display_length) / 12
-            candidates.append({"fragments": raw, "positions": raw_positions, "excerpt": visible, "score": round(cluster_value * 1.4 + voice + length_bonus, 3), "display_length": display_length})
+            candidates.append({
+                "fragments": raw,
+                "positions": raw_positions,
+                "excerpt": visible,
+                "score": round(cluster_value * 1.4 + voice + length_bonus, 3),
+                "display_length": display_length,
+                "display_operational_promotion": bool(display_operational_promotion_markers(visible)),
+            })
     if not candidates:
         raw = body[window["start"]:window["end"]]
         if len(raw) > EXCERPT_MAX:
@@ -3111,6 +3226,7 @@ def excerpt_candidates(body: str, window: dict, definition: dict) -> list[dict]:
             raw = raw[:cut or EXCERPT_MAX]
         return [{"fragments": [raw], "positions": [[window["start"], window["start"] + len(raw)]], "excerpt": raw.strip(), "score": 0.0}]
     candidates.sort(key=lambda item: (
+        item.get("display_operational_promotion", False),
         not item.get("protect_reviewed_selection", False),
         int(item.get("display_length", 0) < EXCERPT_PREFERRED_MIN),
         not item.get("reviewed_passage", False),
@@ -3665,6 +3781,7 @@ def command_render(args: argparse.Namespace) -> None:
                 work_conflict_markers = list(dict.fromkeys([
                     *[term for term in comparison_terms if term and term in raw_excerpt],
                     *[f"《{term}》" for term in other_work_titles(raw_excerpt, target_config)],
+                    *[f"《{term}》" for term in role_related_other_work_titles(raw_excerpt, target_config)],
                 ]))
                 target_review_required = final_alignment.get("target", {}).get("passed") is not True
                 excerpt_segments = excerpt_evidence_segments(excerpt)
@@ -3684,6 +3801,34 @@ def command_render(args: argparse.Namespace) -> None:
                     int(index) for index, segment in excerpt_segments.items()
                     if any(term in segment for term in aspect_terms)
                 ]
+                target_anchor_terms = list(dict.fromkeys(strong_terms + weak_terms + auxiliary_terms))
+                target_segments = target_evidence_segments(
+                    row,
+                    body,
+                    target_config,
+                    " ".join(filter(None, [
+                        body[context_start:positions[0][0]], raw_excerpt, body[positions[-1][1]:context_end],
+                    ])),
+                )
+                display_promotion_markers = display_operational_promotion_markers(excerpt)
+                irrelevant_leading_indexes = unrelated_leading_segment_indexes(
+                    excerpt_segments, strong_terms + weak_terms, aspect_terms,
+                )
+                target_context_flags = []
+                if target_review_required:
+                    target_keys = {normalized(term) for term in strong_terms + weak_terms if normalized(term)}
+                    other_bracketed_titles = {
+                        match.group(1) for match in re.finditer(r"《([^》]{1,40})》", body)
+                        if normalized(match.group(1))
+                        and not any(
+                            normalized(match.group(1)) == key
+                            or normalized(match.group(1)) in key
+                            or key in normalized(match.group(1))
+                            for key in target_keys
+                        )
+                    }
+                    if len(other_bracketed_titles) >= 3:
+                        target_context_flags.append("multi_work_roundup")
                 semantic_input = {
                     "view_id": view_id, "source_id": row["id"], "batch": batch, "cluster_id": str(definition["id"]),
                     "cluster_title": definition["title"], "cluster_stance": definition["stance"],
@@ -3695,10 +3840,15 @@ def command_render(args: argparse.Namespace) -> None:
                     "short_excerpt": short_excerpt,
                     "target_review_required": target_review_required,
                     "work_consistency_review_required": bool(work_conflict_markers),
+                    **({"target_anchor_terms": target_anchor_terms} if target_review_required else {}),
+                    **({"target_evidence_segments": target_segments} if target_review_required else {}),
+                    **({"target_context_flags": target_context_flags} if target_context_flags else {}),
+                    **({"display_operational_promotion_markers": display_promotion_markers} if display_promotion_markers else {}),
+                    **({"irrelevant_leading_segment_indexes": irrelevant_leading_indexes} if irrelevant_leading_indexes else {}),
                     **({"work_conflict_markers": work_conflict_markers} if work_conflict_markers else {}),
-                    **({"raw_excerpt": raw_excerpt} if raw_excerpt != excerpt and (target_review_required or work_conflict_markers) else {}),
+                    **({"raw_excerpt": raw_excerpt} if raw_excerpt != excerpt and work_conflict_markers else {}),
                 }
-                if short_excerpt or target_review_required or work_conflict_markers or promotion_markers:
+                if short_excerpt or work_conflict_markers or promotion_markers or display_promotion_markers or irrelevant_leading_indexes:
                     semantic_input["context_before"] = body[context_start:positions[0][0]]
                     semantic_input["context_after"] = body[positions[-1][1]:context_end]
                 semantic_input["review_fingerprint"] = semantic_review_fingerprint(semantic_input)
@@ -3718,6 +3868,12 @@ def command_render(args: argparse.Namespace) -> None:
                         aspect_evidence = indexed_excerpt_evidence(semantic, semantic_input, "aspect_evidence")
                         stance_evidence = indexed_excerpt_evidence(semantic, semantic_input, "stance_evidence")
                         reviewed_stance = clean(semantic.get("stance"))
+                        if display_promotion_markers:
+                            item_failures.append("展示摘录仍含购买、抽奖、关注或参与指令；须重截为纯观点片段后再保留")
+                        if irrelevant_leading_indexes:
+                            item_failures.append(
+                                f"展示摘录第 {irrelevant_leading_indexes} 段为目标观点前的无关八卦；须从有效观点处重截"
+                            )
                         if reviewed_stance != clean(definition["stance"]):
                             item_failures.append(f"摘录立场 {reviewed_stance or '空'} 与观点簇立场不一致")
                         if semantic.get("self_contained") is not True:
@@ -3732,11 +3888,14 @@ def command_render(args: argparse.Namespace) -> None:
                         if aspect_terms and not any(term in aspect_evidence for term in aspect_terms):
                             item_failures.append("方面证据未命中该观点簇的任何具体方面词，需重截或重新归簇")
                         if target_review_required:
-                            target_evidence = clean(semantic.get("target_evidence"))
-                            if semantic.get("target_passed") is not True:
-                                item_failures.append("脚本无法确认目标作品，AI复核也未通过")
-                            if not target_evidence or target_evidence not in raw_excerpt:
-                                item_failures.append("目标证据不是后台逐字原文片段中的子串")
+                            target_evidence = indexed_target_evidence(semantic, semantic_input)
+                            target_scope = " ".join(target_segments.values())
+                            if semantic.get("target_relation_passed") is not True:
+                                item_failures.append("脚本无法确认目标作品，AI未确认目标锚点与当前观点属于同一语义关系")
+                            if not target_evidence or target_evidence not in target_scope:
+                                item_failures.append("目标证据候选编号无效，且未提供脚本候选中的逐字证据")
+                            elif not any(term in target_evidence for term in target_anchor_terms):
+                                item_failures.append("目标证据未包含作品名、节目名、演员或角色锚点")
                         if work_conflict_markers:
                             consistency_evidence = clean(semantic.get("work_consistency_evidence"))
                             if semantic.get("work_consistency_passed") is not True:
@@ -3820,9 +3979,11 @@ def command_render(args: argparse.Namespace) -> None:
                     if opinion_evidence:
                         semantic_effective["opinion_evidence"] = opinion_evidence
                     if target_review_required:
-                        final_alignment["target"] = {**final_alignment["target"], "passed": semantic.get("target_passed") is True, "basis": "ai_final_target_review", "review_evidence": clean(semantic.get("target_evidence"))}
-                        semantic_effective["target_passed"] = semantic.get("target_passed") is True
+                        resolved_target_evidence = indexed_target_evidence(semantic, semantic_input)
+                        final_alignment["target"] = {**final_alignment["target"], "passed": semantic.get("target_relation_passed") is True, "basis": "ai_final_target_relation_review", "review_evidence": resolved_target_evidence}
+                        semantic_effective["target_passed"] = semantic.get("target_relation_passed") is True
                         semantic_effective["target_basis"] = "ai_final_target_review"
+                        semantic_effective["target_evidence"] = resolved_target_evidence
                     else:
                         semantic_effective["target_passed"] = True
                         semantic_effective["target_basis"] = "script_passage_alignment"
@@ -3937,7 +4098,7 @@ def command_render(args: argparse.Namespace) -> None:
     )
     write_json(run_dir / "final_excerpt_review_contract.json", {
         "scope": "current_period_final_excerpt_review_contract",
-        "instruction": "脚本已检查逐字位置、目标锚点、对比作品、长度和清洁标记。AI按 excerpt_segments 顺序阅读全文，只返回方面与立场证据的候选编号；候选均不适用时才复制逐字证据。仅在输入明确标记 target_review_required 或 work_consistency_review_required 时补对应字段。",
+        "instruction": "脚本已检查逐字位置、长度和清洁标记。AI按 excerpt_segments 顺序核对方面与立场。target_review_required 时，须确认目标锚点和当前观点确属同一对象；作品只在标签、名单或综合盘点中出现不能通过。work_consistency_review_required 时，须确认方面证据评价的是目标作品，不能把对比作品的演员、角色或剧情归给目标作品。展示段含购买、抽奖、关注、参与指令或观点前无关八卦时，先重截，无法重截再 drop。",
         "allowed_decisions": ["keep", "drop"],
         "full_source_lookup_file": "retained_sources.jsonl",
         "evidence_scopes": {
@@ -3945,7 +4106,7 @@ def command_render(args: argparse.Namespace) -> None:
             "stance_evidence_candidate_index": "excerpt_segments",
             "opinion_evidence_candidate_index": "excerpt_segments",
             "exact_text_fallback": "仅当候选均不适用时，才填写对应的不带 _candidate_index 的逐字证据字段",
-            "target_evidence_when_required": "raw_excerpt；若该字段省略则使用按序拼接的 excerpt_segments",
+            "target_evidence_candidate_index": "target_evidence_segments；候选均不适用时才填写 target_evidence 逐字证据",
             "work_consistency_evidence_when_required": "raw_excerpt；若该字段省略则使用按序拼接的 excerpt_segments"
         },
         "preferred_length": [EXCERPT_PREFERRED_MIN, EXCERPT_MAX],
