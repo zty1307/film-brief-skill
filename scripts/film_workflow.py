@@ -68,7 +68,7 @@ STAGE_GUIDANCE = {
     ],
     "source_review": [
         "逐条阅读分片中的逐字候选和必要父帖上下文；只有候选不足以判断时才按 source_id 回查完整来源",
-        "retain 只需决定和逐字证据；exclude 另填简短具体理由。优先填写 evidence_candidate_index，候选均不适用时再提供逐字 evidence 或 evidence_position",
+        "retain 只需决定和证据编号；读后同意 auto_reason 的 exclude 不重复抄理由，理由不同才另写。优先填写 evidence_candidate_index，候选均不适用时再提供逐字 evidence 或 evidence_position",
         "证据格式错误时只修证据字段，不得为了通过校验把 retain 改成 exclude",
         "相同观点的独立作者均可保留；综艺还须核对最新一期、前一期当周突出话题或节目级讨论",
     ],
@@ -108,12 +108,13 @@ STAGE_GUIDANCE = {
     ],
     "final_excerpt_review": [
         "审核最终清洗后展示文字本身，常规项只核对方面、局部立场和语义完整性；对象与跨作品字段仅在输入明确标记时填写",
-        "常规保留项按 excerpt_segments 编号选择方面和立场证据，不抄原文、不写保留理由；只有候选均不适用时才填写逐字证据",
-        "cluster_claim_review_required=true 时，额外确认摘录可以直接放在观点标题下且无需补充推理；宽泛词、人物名单、物料或品牌动作本身不能代替标题主张",
+        "常规保留只填 decision 和 evidence_candidate_index；keep 表示已读并确认四项对齐，控制器补齐指纹、立场与确认字段；必要时分填方面/立场编号",
+        "判断样本是否支持簇的核心评价方向，不要求每条覆盖标题中全部并列细节；标题概括过窄时调整标题，不因此逐条删样本",
         "target_review_required 时从 target_evidence_segments 选编号，并判断目标锚点与当前观点是否同属一个对象；标签、名单或综合盘点中的顺带出现不能通过",
         "work_consistency_review_required 时核对方面证据究竟评价哪部作品；展示段含购买、抽奖、关注、参与指令或观点前无关八卦时先重截",
         "片段可修复时先回看全文重截；归簇不当时先尝试重归簇或建立真实新簇，再考虑逐来源 drop",
         "不得用文章整体立场否定其中可独立成立的局部观点，也不得为了缩量删除合格独立表达",
+        "input_file 的 submission_errors 是当前条目具体错误；词表存疑可用 reason 简短解释真实语义，不得靠校验函数批量生成决定",
     ],
     "render_repair": [
         "逐项读取 render_failures.json，回到对应来源修复摘录、归簇或复核字段",
@@ -437,6 +438,46 @@ def list_review_map(payload: dict | None, key_field: str) -> dict[str, dict]:
             if isinstance(item, dict) and clean(item.get(key_field)):
                 result[clean(item[key_field])] = item
     return result
+
+
+def expand_compact_submission(payload: dict | None, workflow_id: str, inputs: list[Path], items: dict[str, dict], *, final: bool = False) -> dict | None:
+    """Backfill mechanical fields only after an explicit AI decision.
+
+    Compact keep means the same semantic assertions as the verbose contract;
+    it does not license a script to invent decisions. Stale submissions are
+    never rebound to new evidence.
+    """
+    if not payload or binding_issue(payload, workflow_id, inputs):
+        return payload
+    key_field = "view_id" if final else "source_id"
+    expanded = {}
+    for key, original in list_review_map(payload, key_field).items():
+        review = dict(original)
+        item = items.get(key)
+        if item is None:
+            expanded[key] = review
+            continue
+        if final and "review_fingerprint" not in review:
+            review["review_fingerprint"] = item.get("review_fingerprint", "")
+            if review.get("decision") == "keep":
+                review.setdefault("stance", item.get("cluster_stance"))
+                review.setdefault("self_contained", True)
+                index = review.pop("evidence_candidate_index", None)
+                for field in ("aspect_evidence", "stance_evidence", "cluster_claim_evidence"):
+                    review.setdefault(f"{field}_candidate_index", index)
+                for required, field in (
+                    ("target_review_required", "target_relation_passed"),
+                    ("work_consistency_review_required", "work_consistency_passed"),
+                    ("cluster_claim_review_required", "cluster_claim_passed"),
+                    ("promotion_markers", "independent_opinion_passed"),
+                ):
+                    if item.get(required):
+                        review.setdefault(field, True)
+        elif not final and review.get("decision") == "exclude" and item.get("auto_decision") == "exclude":
+            if not clean(review.get("reason")):
+                review["reason"] = item.get("auto_reason", "")
+        expanded[key] = review
+    return {**payload, "reviews": expanded if final else [{**value, key_field: key} for key, value in expanded.items()]}
 
 
 def next_incomplete_chunk(paths: list[Path], key_field: str, missing_ids: set[str]) -> tuple[Path | None, int, int]:
@@ -815,12 +856,13 @@ def source_review_template_payload(workflow_id: str, inputs: list[Path], queue: 
         review = {
             "source_id": clean(item.get("id")),
             "decision": "",
-            "reason": "",
             # Candidate 1 is already a verbatim, source-local passage.  It is a
             # safe default that ordinary models may replace when another
             # candidate better supports their semantic decision.
             "evidence_candidate_index": 1 if item.get("review_evidence_candidates") else None,
         }
+        if item.get("auto_decision") != "exclude":
+            review["reason"] = ""
         if item.get("episode_review_required") is True:
             review.update({
                 "episode_scope": "",
@@ -835,7 +877,8 @@ def source_review_template_payload(workflow_id: str, inputs: list[Path], queue: 
             "instruction": "只填写 workflow_status.input_file 中的当前分片；控制器会自动累计此前分片",
             "allowed_decisions": ["retain_core", "retain_consensus", "exclude"],
             "required_for_retain": ["source_id", "decision", "evidence_candidate_index_or_exact_evidence"],
-            "required_for_exclude": ["source_id", "decision", "reason", "evidence_candidate_index_or_exact_evidence"],
+            "required_for_exclude": ["source_id", "decision", "evidence_candidate_index_or_exact_evidence"],
+            "exclude_reason": "读后同意输入的 auto_reason 时无需抄写，控制器补齐；不同理由必须填写 reason。不得未读即批量同意脚本。",
             "evidence_candidate_index": "candidate 1 is prefilled when available; keep it only if it supports the decision, otherwise choose another candidate_index",
             "exact_evidence_fallback": "use evidence or evidence_position only when no generated candidate supports the decision",
             "exact_copy_group": "review the representative once; select propagates the result to copy_group_source_ids",
@@ -877,42 +920,35 @@ def final_excerpt_review_template_payload(
             int(index) for index, segment in segments.items()
             if api.stance_evidence_supports(expected_stance, segment)
         ]
-        reviews[view_id] = {
-            "review_fingerprint": clean(item.get("review_fingerprint")),
-            "decision": "",
-            "aspect_evidence_candidate_index": aspect_candidates[0] if aspect_candidates else None,
-            "stance": expected_stance,
-            "stance_evidence_candidate_index": stance_candidates[0] if stance_candidates else None,
-            "self_contained": None,
-        }
+        joint = [index for index in aspect_candidates if index in stance_candidates]
+        reviews[view_id] = {"decision": "", "evidence_candidate_index": joint[0] if joint else None}
         if item.get("target_review_required"):
             target_candidates = item.get("target_evidence_segments") or {}
             target_is_roundup = "multi_work_roundup" in set(item.get("target_context_flags") or [])
             reviews[view_id].update({
-                "target_relation_passed": None,
                 "target_evidence_candidate_index": 1 if "1" in target_candidates and not target_is_roundup else None,
             })
         if item.get("work_consistency_review_required"):
-            reviews[view_id].update({"work_consistency_passed": None, "work_consistency_evidence": ""})
+            reviews[view_id].update({"work_consistency_evidence": ""})
         if item.get("promotion_markers"):
-            reviews[view_id].update({"independent_opinion_passed": None, "opinion_evidence_candidate_index": None})
-        if item.get("cluster_claim_review_required"):
-            claim_candidates = [
-                int(value) for value in item.get("cluster_claim_candidate_indexes", [])
-                if str(value) in segments
-            ]
-            reviews[view_id].update({
-                "cluster_claim_passed": None,
-                "cluster_claim_evidence_candidate_index": claim_candidates[0] if claim_candidates else None,
-            })
+            reviews[view_id].update({"opinion_evidence_candidate_index": None})
+        # Surface the existing optional explanation only where it is needed,
+        # so the operator need not discover it through a failed submission.
+        probe = {**reviews[view_id], "decision": "keep", "stance": expected_stance,
+                 "aspect_evidence_candidate_index": joint[0] if joint else None,
+                 "stance_evidence_candidate_index": joint[0] if joint else None}
+        if any(error.startswith("reason:") for error in api.final_excerpt_review_errors(probe, item)):
+            reviews[view_id]["reason"] = ""
     return {
         "scope": "current_period_final_excerpt_semantic_reviews",
         "_workflow": binding(workflow_id, inputs),
         "contract": {
-            "schema_version": 6,
-            "instruction": "只填写当前分片。脚本已预选方面、立场及证据编号；逐条核对后只改错误项，并填写 decision 与 self_contained。常规 keep 不写理由、不复制原文。cluster_claim_review_required 时，确认摘录可直接支持 cluster_title，无需分析者补充推理；泛群像、泛竞争、泛特效、名单或物料不能代替具体主张。目标复核须确认锚点和当前观点属于同一对象；仅在标签、名单或综合盘点中出现不得通过。跨作品复核须确认方面证据评价目标作品。含购买、抽奖、关注、参与指令或观点前无关八卦的展示段先重截。",
+            "schema_version": 7,
+            "instruction": "只填写当前分片。脚本已预选方面、立场及证据编号；读完每条后填写 decision=keep/drop；普通 keep 只选 evidence_candidate_index，一个编号同时作为方面和立场证据。常规 keep 不写理由、不复制原文。若 submission_errors 提示词表存疑，允许保留并用 reason 一句话解释原文的真实语义；不能为迎合词表改立场或删来源。跨作品 keep 的 reason 说明评价实际属于哪部作品，证据用完整句段，不只摘作品名。候选编号只是建议，必须读完摘录再判断；不得调用校验函数或脚本批量生成语义决定。cluster_claim_review_required 时，确认摘录支持 cluster_title 的核心评价方向，不必覆盖标题所有并列细节；泛群像、泛竞争、泛特效、名单或物料不能代替具体主张。目标复核须确认锚点和当前观点属于同一对象；仅在标签、名单或综合盘点中出现不得通过。跨作品复核须确认方面证据评价目标作品。含购买、抽奖、关注、参与指令或观点前无关八卦的展示段先重截。",
             "full_source_lookup": "仅对需要重截、转簇或核对跨作品的项目按 source_id 回查 retained_sources.jsonl",
-            "required_for_normal_keep": ["decision=keep", "aspect_evidence_candidate_index", "stance", "stance_evidence_candidate_index", "self_contained=true"],
+            "required_for_normal_keep": ["decision=keep", "evidence_candidate_index"],
+            "keep_means": "AI已读完摘录并确认目标、核心方面、局部立场和完整性。控制器补齐指纹、簇立场和确认字段；不得未读批量keep。两个证据不在同一段时另填 aspect_evidence_candidate_index 与 stance_evidence_candidate_index。",
+            "reason": "只在模板预留 reason 或 submission_errors 提示语义存疑时，用一句话说明本条依据；正常样本不用解释。",
             "exact_text_fallback": "候选均不适用时，才填写 aspect_evidence、stance_evidence、opinion_evidence 或 target_evidence 的逐字原文",
             "script_owned": ["target when target_review_required=false", "work consistency when work_consistency_review_required=false", "length", "markup", "verbatim positions"],
             "drop_fields": ["reason", "failed_checks", "reexcerpt_attempted", "reassignment_attempted when aspect or stance fails", "reassignment_reason", "conflict_evidence when work consistency fails"],
@@ -947,83 +983,7 @@ def pipeline_api():
 
 
 def final_excerpt_review_is_filled(review: dict, input_item: dict | None = None) -> bool:
-    decision = clean(review.get("decision"))
-    if decision not in {"keep", "drop"}:
-        return False
-    input_item = input_item or {}
-    if clean(review.get("review_fingerprint")) != clean(input_item.get("review_fingerprint")):
-        return False
-    if decision == "keep":
-        reviewed_stance = clean(review.get("stance"))
-        if reviewed_stance not in {"positive", "objective", "negative"}:
-            return False
-        expected_stance = clean(input_item.get("cluster_stance"))
-        if expected_stance and reviewed_stance != expected_stance:
-            return False
-        if review.get("self_contained") is not True:
-            return False
-        excerpt = clean("".join(str(value) for value in (input_item.get("excerpt_segments") or {}).values()))
-        aspect_evidence = selected_excerpt_evidence(review, input_item, "aspect_evidence")
-        stance_evidence = selected_excerpt_evidence(review, input_item, "stance_evidence")
-        if any(not evidence or evidence not in excerpt for evidence in (aspect_evidence, stance_evidence)):
-            return False
-        api = pipeline_api()
-        if expected_stance and api.stance_evidence_conflicts(expected_stance, stance_evidence):
-            return False
-        if expected_stance and not api.stance_evidence_supports(expected_stance, stance_evidence):
-            return False
-        aspect_terms = [clean(value) for value in input_item.get("aspect_terms", []) if clean(value)]
-        if aspect_terms and not any(term in aspect_evidence for term in aspect_terms):
-            return False
-        if input_item.get("display_operational_promotion_markers"):
-            return False
-        if input_item.get("irrelevant_leading_segment_indexes"):
-            return False
-        if input_item.get("target_review_required") and (
-            review.get("target_relation_passed") is not True
-        ):
-            return False
-        api = pipeline_api()
-        if input_item.get("target_review_required"):
-            target_evidence = api.indexed_target_evidence(review, input_item)
-            target_scope = " ".join(clean(value) for value in (input_item.get("target_evidence_segments") or {}).values())
-            target_terms = [clean(value) for value in input_item.get("target_anchor_terms", []) if clean(value)]
-            if not target_evidence or target_evidence not in target_scope:
-                return False
-            if target_terms and not any(term in target_evidence for term in target_terms):
-                return False
-        raw_excerpt = clean(input_item.get("raw_excerpt")) or excerpt
-        if input_item.get("work_consistency_review_required") and (
-            review.get("work_consistency_passed") is not True or not clean(review.get("work_consistency_evidence"))
-        ):
-            return False
-        if input_item.get("work_consistency_review_required") and clean(review.get("work_consistency_evidence")) not in raw_excerpt:
-            return False
-        if input_item.get("short_excerpt"):
-            support_evidence = aspect_evidence if api.short_excerpt_support_is_specific(excerpt, aspect_evidence) else stance_evidence
-            if not api.short_excerpt_support_is_specific(excerpt, support_evidence):
-                return False
-        if input_item.get("promotion_markers"):
-            opinion_evidence = selected_excerpt_evidence(review, input_item, "opinion_evidence")
-            if review.get("independent_opinion_passed") is not True or not opinion_evidence or opinion_evidence not in excerpt:
-                return False
-            if not api.promotion_evidence_is_independent(opinion_evidence):
-                return False
-        if input_item.get("cluster_claim_review_required"):
-            claim_evidence = selected_excerpt_evidence(review, input_item, "cluster_claim_evidence")
-            if review.get("cluster_claim_passed") is not True or not claim_evidence or claim_evidence not in excerpt:
-                return False
-        return True
-    if not clean(review.get("reason")):
-        return False
-    failed_checks = review.get("failed_checks")
-    if not isinstance(failed_checks, list) or not failed_checks or review.get("reexcerpt_attempted") is not True:
-        return False
-    if {clean(value) for value in failed_checks} & {"aspect", "stance", "cluster_claim"}:
-        return review.get("reassignment_attempted") is True and bool(clean(review.get("reassignment_reason")))
-    if "work_consistency" in {clean(value) for value in failed_checks}:
-        return bool(clean(review.get("conflict_evidence")))
-    return True
+    return not pipeline_api().final_excerpt_review_errors(review, input_item or {})
 
 
 def cluster_set_review_template_payload(
@@ -1270,6 +1230,10 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
     if source_queue or p['source'].exists():
         source_payload = review_payload(p["source"])
         issue = binding_issue(source_payload, workflow_id, source_inputs)
+        source_payload = expand_compact_submission(
+            source_payload, workflow_id, source_inputs,
+            {clean(item.get("id")): item for item in source_queue},
+        )
         source_ledger = cumulative_review_payload(
             workflow_id, source_inputs, source_payload, p["source_ledger"],
             "source_id", "current_period_source_fulltext_reviews",
@@ -1313,7 +1277,7 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             )
         write_json(p["source"], source_ledger)
 
-    validation_inputs = source_inputs + [PIPELINE, CONTROLLER]
+    validation_inputs = source_inputs + [p["source"], PIPELINE, CONTROLLER]
     validation_token = digest_paths(validation_inputs)
     if not stage_fresh(
         manifest,
@@ -1673,6 +1637,9 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
         if clean(item.get("view_id"))
     }
     required_views = {clean(item.get("view_id")) for item in semantic_review_items}
+    semantic_payload = expand_compact_submission(
+        semantic_payload, workflow_id, semantic_inputs, semantic_input_map, final=True,
+    )
     if not required_views:
         semantic_issue = ""
     semantic_ledger = cumulative_fingerprinted_review_payload(
@@ -1680,10 +1647,24 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
     )
     write_json(p["semantic_ledger"], semantic_ledger)
     semantic_review_map = list_review_map(semantic_ledger, "view_id")
-    semantic_done = {
-        view_id for view_id, item in semantic_review_map.items()
-        if final_excerpt_review_is_filled(item, semantic_input_map.get(view_id))
+    # Read source text in Python only when a cross-work drop needs provenance.
+    # This does not send the full file to the model.
+    needs_source = any(
+        value.get("decision") == "drop" and "work_consistency" in (value.get("failed_checks") or [])
+        for value in semantic_review_map.values()
+    )
+    source_texts = {
+        clean(row.get("id")): pipeline_api().source_text(row)
+        for row in read_jsonl(p["run"] / "retained_sources.jsonl")
+    } if needs_source else {}
+    semantic_errors = {
+        view_id: pipeline_api().final_excerpt_review_errors(
+            review, semantic_input_map.get(view_id, {}),
+            source_texts.get(clean(semantic_input_map.get(view_id, {}).get("source_id"))),
+        )
+        for view_id, review in semantic_review_map.items()
     }
+    semantic_done = {view_id for view_id, errors in semantic_errors.items() if not errors}
     if semantic_issue or required_views - semantic_done:
         template = p["templates"] / "final_excerpt_semantic_reviews.template.json"
         excerpt_template = p["templates"] / "excerpt_reviews.template.json"
@@ -1703,6 +1684,11 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             if clean(item.get("view_id")) in current_ids and clean(item.get("view_id")) in missing_views
         ]
         current_input = p["run"] / "final_excerpt_review.current.jsonl"
+        current_items = [
+            {**item, **({"submission_errors": semantic_errors[item["view_id"]]}
+                       if semantic_errors.get(item["view_id"]) else {})}
+            for item in current_items
+        ]
         write_jsonl(current_input, current_items)
         semantic_submission = final_excerpt_review_template_payload(workflow_id, semantic_inputs, current_items)
         for view_id in list(semantic_submission["reviews"]):
@@ -1719,6 +1705,8 @@ def status_payload(workspace: Path, manifest: dict) -> dict:
             full_input_file=str(semantic_inputs[0]), contract_file=str(semantic_inputs[1]),
             full_source_file=str(p["run"] / "retained_sources.jsonl"), binding_issue=semantic_issue,
             required=len(required_views), completed=len(required_views & semantic_done), missing=len(required_views - semantic_done), edit_file_ready=True,
+            rejected_submissions=sum(bool(semantic_errors.get(item["view_id"])) for item in current_items),
+            repair_instruction="已提交但未通过的条目，其具体字段错误直接列在 input_file 的 submission_errors；只修这些字段，不要研究源码或按词表生成判断",
         )
     write_json(p["semantic"], semantic_ledger)
 

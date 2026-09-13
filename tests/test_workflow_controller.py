@@ -120,6 +120,21 @@ for _ in range(30):
                 "evidence_candidate_index": candidate["candidate_index"],
             })
         dump(Path(state["required_file"]), template)
+        # Reproduce a domestic-model evidence typo, then repair it in place.
+        # The validation digest must include that edit (no manifest reset).
+        good_source_submission = json.loads(json.dumps(template))
+        template["reviews"][0].pop("evidence_candidate_index")
+        template["reviews"][0]["evidence"] = "This sentence does not occur in the source."
+        dump(Path(state["required_file"]), template)
+        for repair_step in range(5):
+            repair_state = run("advance", "--workspace", str(WORKSPACE), "--timeout", "0.2")
+            if repair_state.get("validation_file"):
+                break
+            assert repair_state["status"] == "READY_TO_ADVANCE", repair_state
+        else:
+            raise AssertionError("source evidence error was not surfaced")
+        assert load(Path(repair_state["validation_file"]))["status"] != "PASS"
+        dump(Path(repair_state["required_file"]), good_source_submission)
     elif stage == "cluster_discovery":
         assert state.get("input_files") and state.get("full_input_file")
         discovery_rows = [json.loads(line) for line in Path(state["input_file"]).read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -186,16 +201,19 @@ for _ in range(30):
             assert "context_before" not in item and "context_after" not in item
             excerpt = "".join(item["excerpt_segments"].values())
             template["reviews"][item["view_id"]] = {
-                "review_fingerprint": item["review_fingerprint"],
-                "decision": "keep", "aspect_evidence_candidate_index": 1, "stance": "positive",
-                "stance_evidence_candidate_index": 1, "self_contained": True,
+                "decision": "keep", "evidence_candidate_index": 1,
             }
-            if item.get("cluster_claim_review_required"):
-                template["reviews"][item["view_id"]].update({
-                    "cluster_claim_passed": True,
-                    "cluster_claim_evidence_candidate_index": 1,
-                })
             assert len(excerpt) >= 70
+        good_final_submission = json.loads(json.dumps(template))
+        first_review = next(iter(template["reviews"].values()))
+        first_review["evidence_candidate_index"] = 999
+        dump(Path(state["required_file"]), template)
+        repair_state = run("advance", "--workspace", str(WORKSPACE), "--timeout", "0.2")
+        assert repair_state["stage"] == "final_excerpt_review", repair_state
+        assert repair_state["rejected_submissions"] == 1, repair_state
+        repair_rows = [json.loads(line) for line in Path(repair_state["input_file"]).read_text(encoding="utf-8").splitlines()]
+        assert any("stance_evidence:" in error for error in repair_rows[0]["submission_errors"])
+        template = good_final_submission
         dump(Path(state["required_file"]), template)
     else:
         raise AssertionError(state)

@@ -88,7 +88,7 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 }
 ```
 
-`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须提交逐字证据；`retain_core` 和 `retain_consensus` 无需重复写理由，`exclude` 另填简短具体理由。控制器每轮提供下一批不超过60条且不超过约120KB的精简记录；分片不重复整篇正文、统一回查说明、质量中间量或候选命中词。优先填写 `evidence_candidate_index`，脚本自动还原逐字原文及位置；候选均不适用时，才按 `workflow_status.full_source_file` 和 `source_id` 回查全文并填写 `evidence` 或 `evidence_position`。提交由脚本账本累计，执行模型不复制历史答案。
+`decision` 仅允许 `retain_core`、`retain_consensus`、`exclude`。三种决定都必须提交逐字证据；`retain_core` 和 `retain_consensus` 无需重复写理由，`exclude` 若同意当前输入的 `auto_reason`，无需重复抄写，控制器在明确 exclude 后补齐；理由不同时另填 `reason`。控制器每轮提供下一批不超过60条且不超过约120KB的精简记录；分片不重复整篇正文、统一回查说明、质量中间量或候选命中词。优先填写 `evidence_candidate_index`，脚本自动还原逐字原文及位置；候选均不适用时，才按 `workflow_status.full_source_file` 和 `source_id` 回查全文并填写 `evidence` 或 `evidence_position`。提交由脚本账本累计，执行模型不复制历史答案。
 
 ## 同稿审计
 
@@ -222,30 +222,25 @@ Skill 自带“精简核心库 + 已核验补充库” `assets/media_subject_reg
 ```json
 {
   "scope": "current_period_final_excerpt_semantic_reviews",
+  "_workflow": {"workflow_id": "控制器预填，保持不变", "input_sha256": "控制器预填，保持不变"},
   "reviews": {
-    "来源ID::簇ID": {
-      "review_fingerprint": "模板预填值，保持不变",
-      "decision": "keep",
-      "aspect_evidence_candidate_index": 1,
-      "stance": "positive",
-      "stance_evidence_candidate_index": 2,
-      "self_contained": true,
-      "cluster_claim_passed": true,
-      "cluster_claim_evidence_candidate_index": 1
-    }
+    "来源ID::簇ID": {"decision": "keep", "evidence_candidate_index": 1}
   }
 }
 ```
 
+
 该文件只包含脚本无法高置信确认的最终展示文字。脚本会依次尝试已选片段和后续候选，自动修复能够通过换候选解决的边界、标记、长度和引号问题。对于70—150字、句段完整，并且同一局部句段同时包含具体方面与单一立场、没有转折反向、对象不明、跨作品、促销或无关前缀风险的摘录，脚本直接生成可审计的保留决定。方面和态度分散在不同句段时仍可保留，但必须进入AI复核确认语义关系。`群像、竞争、白月光、特效、制作、质感` 等宽泛词可以召回候选，不能单独触发脚本自动通过。其余项目每轮最多80条，同时把单批文件限制在90KB以内。
 
-每条复核保留模板预填的 `review_fingerprint`。普通 `keep` 只填决定、方面证据编号、立场、立场证据编号和 `self_contained:true`，无需填写理由或复制原文。脚本按编号回填逐字证据；候选均不适用时才可填写不带 `_candidate_index` 的逐字原文字段。只修改少数摘录时，控制器按条目指纹保留其余未变化的已审结果。
+保持 `_workflow` 不变；控制器只对匹配当前输入的简写提交回填逐条 `review_fingerprint`，不会把旧判断绑定到变化后的原文。普通 `keep` 只填决定与 `evidence_candidate_index`，一个编号同时引用方面和立场证据。keep 明确表示AI已阅读并确认作品、核心方面、局部立场和完整性；控制器补齐指纹、立场和确认字段。原文支持不足时不可 keep。两项证据分散时可分填方面、立场编号；旧的完整字段提交仍受支持。脚本按编号回填逐字证据；候选均不适用时才可填写不带 `_candidate_index` 的逐字原文字段。只修改少数摘录时，控制器按条目指纹保留其余未变化的已审结果。
 
-输入标记 `target_review_required:true` 时，模板另含 `target_relation_passed` 和预填的 `target_evidence_candidate_index`。目标证据必须来自 `target_evidence_segments`，并包含作品、节目、演员或角色锚点；通过仍要求该锚点与当前观点属于同一评价对象。目标只在标签、作品名单或综合盘点中出现时不得通过。输入标记 `work_consistency_review_required:true` 时，须确认方面证据评价目标作品，不能用另一作品的演员、角色或剧情支撑当前簇。`display_operational_promotion_markers` 或 `irrelevant_leading_segment_indexes` 非空时，当前展示段不能直接 keep，先在同一来源重截，确无合格片段再 drop。
+输入标记 `target_review_required:true` 时，模板另含预填的 `target_evidence_candidate_index`；简写 keep 同时声明目标关系已核实，脚本回填 `target_relation_passed`。目标证据必须来自 `target_evidence_segments`，并包含作品、节目、演员或角色锚点；通过仍要求该锚点与当前观点属于同一评价对象。目标只在标签、作品名单或综合盘点中出现时不得通过。输入标记 `work_consistency_review_required:true` 时，须确认方面证据评价目标作品，不能用另一作品的演员、角色或剧情支撑当前簇。`display_operational_promotion_markers` 或 `irrelevant_leading_segment_indexes` 非空时，当前展示段不能直接 keep，先在同一来源重截，确无合格片段再 drop。
 
-输入标记 `cluster_claim_review_required:true` 时，模板另含 `cluster_claim_passed` 和 `cluster_claim_evidence_candidate_index`。只有摘录能直接支持 `cluster_title`、无需分析者补充缺失推理时才能设为通过。该标记主要用于只命中宽泛路由词或成员很少的观点簇；它是复核触发器，不是删除规则。无法支持当前标题时先尝试重截、转入更合适的簇或修正有数据依据的簇名。
+输入标记 `cluster_claim_review_required:true` 时，简写 keep 包含对核心主张的确认；脚本回填 `cluster_claim_passed`，必要时另选 `cluster_claim_evidence_candidate_index`。摘录支持簇的核心评价方向即可，不要求每条证明标题全部并列细节。标题过度具体时先调整标题，不能因此逐条删样本。该标记主要用于只命中宽泛路由词或成员很少的观点簇；它是复核触发器，不是删除规则。无法支持当前标题时先尝试重截、转入更合适的簇或修正有数据依据的簇名。
 
 清洁后的摘录优先为70—150字。短于70字时先回看全文，仍无法补足才填写短摘录例外和具体依据编号；具体依据须包含动作、台词、场景、数据或因果分析。作品标签、人物名及“好看、封神、绝了、笑点拉满、期待”等泛泛态度不算具体依据，批量复用同一个例外理由会被脚本拒绝。全文中没有可替换合格片段时使用 `decision:"drop"`。终审不设每簇样本数量规则。
+
+提交不合格的具体字段和修复方法直接放在当前输入的 `submission_errors`。词表对方面、立场或短评依据存疑时，允许AI用 `reason` 一句话解释实际语义并保留，不必迎合词表；跨作品项也填写一句归属说明。正常样本不增加理由。证据须来自原文，只有连接词或名字不能充当评价证据。
 
 若终审 drop 使实际非空簇数变化，控制器要求 `post_excerpt_cluster_count_reviews.json`。模板已预填当前指纹；AI只填写 `decision:"pass"`、空 `issues` 和具体理由，9—16以外另填 `exception_reason`。实际簇数与范围由脚本计算，不要求AI重复填写。
 

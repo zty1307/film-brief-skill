@@ -470,6 +470,7 @@ assert not w.final_excerpt_review_is_filled(blank_excerpt_review)
 blank_excerpt_review.update({"decision": "keep"})
 assert not w.final_excerpt_review_is_filled(blank_excerpt_review, excerpt_input), "只有决定不得跳过必填语义字段"
 blank_excerpt_review.update({
+    "review_fingerprint": "fp-1",
     "aspect_evidence_candidate_index": 1,
     "stance": "positive", "stance_evidence_candidate_index": 2,
     "self_contained": True,
@@ -502,6 +503,7 @@ conditional_input = {
 }
 conditional_review = conditional_template["reviews"]["conditional::P01"]
 conditional_review.update({
+    "review_fingerprint": "fp-2",
     "decision": "keep", "aspect_evidence_candidate_index": 1,
     "stance": "positive", "stance_evidence_candidate_index": 1, "self_contained": True,
 })
@@ -509,6 +511,11 @@ assert not w.final_excerpt_review_is_filled(conditional_review, conditional_inpu
 conditional_review.update({
     "target_relation_passed": True, "target_evidence_candidate_index": 1,
     "work_consistency_passed": True, "work_consistency_evidence": "《测试剧》",
+})
+assert not w.final_excerpt_review_is_filled(conditional_review, conditional_input), "作品名本身不能证明评价归属"
+conditional_review.update({
+    "work_consistency_evidence": "《测试剧》表演自然。",
+    "reason": "表演自然这句明确评价测试剧，未挪用对比作品的评价",
 })
 assert w.final_excerpt_review_is_filled(conditional_review, conditional_input)
 bad_target_review = dict(conditional_review, target_evidence="表演自然", target_evidence_candidate_index=None)
@@ -533,6 +540,7 @@ strict_review = {
     "stance_evidence_candidate_index": 1, "self_contained": True,
 }
 assert not w.final_excerpt_review_is_filled(strict_review, strict_input), "客观簇立场证据含明显褒义词时应在当前分片返修"
+assert w.final_excerpt_review_is_filled({**strict_review, "reason": "突破一千万是预约量的数字陈述，并未称赞剧情或表演"}, strict_input), "允许AI纠正把数值突破误当正向表态的词表"
 strict_input["excerpt_segments"] = {"1": "平台数据显示预约量达到一千万。"}
 assert w.final_excerpt_review_is_filled(strict_review, strict_input)
 
@@ -769,6 +777,33 @@ joint_review = p.deterministic_semantic_keep(
 )
 assert joint_review and joint_review["aspect_evidence_candidate_index"] == 1
 assert joint_review["stance_evidence_candidate_index"] == 1
+quoted_excerpt = "这种所谓的“新鲜”设定让中年观众难以理解，人物不断在现实与书中来回切换，每次危机都通过任务提示解决，观众还没进入故事就被大量规则打断，几个人物也反复交代同样的信息，整体观看门槛明显变高。"
+assert p.deterministic_semantic_keep({
+    **safe_semantic_input, "aspect_terms": ["设定"],
+    "excerpt_segments": {"1": quoted_excerpt},
+}, quoted_excerpt) is None, "引号内的褒义词可能在被质疑，只转AI复核，不自动判正面或删除"
+
+# A complete opinion need not use the script's sentiment vocabulary.
+plain_input = {
+    "review_fingerprint": "plain", "cluster_stance": "positive",
+    "aspect_terms": ["系统"], "short_excerpt": True,
+    "excerpt_segments": {"1": "以前总觉得穿书加系统是网文套路。现在这部剧把它拍出了人味儿。主角不是一路开挂，是真的一拳一脚打出来的江湖。"},
+}
+plain_review = {
+    "review_fingerprint": "plain", "decision": "keep", "stance": "positive",
+    "self_contained": True, "aspect_evidence_candidate_index": 1,
+    "stance_evidence_candidate_index": 1,
+    "reason": "作者用角色亲身闯江湖而非开挂的细节，肯定了系统设定的真实感",
+}
+assert not p.final_excerpt_review_errors(plain_review, plain_input)
+assert w.final_excerpt_review_is_filled(plain_review, plain_input)
+micro_input = {**strict_input, "excerpt_segments": {"1": "当下，平台公布了下一周的播出安排。"}}
+assert any("stance_evidence:" in error for error in p.final_excerpt_review_errors(
+    {**strict_review, "stance_evidence": "当下，"}, micro_input,
+)), "位置子串正确不代表两字连接词能充当立场证据"
+bad_drop = {"review_fingerprint": "plain", "decision": "drop", "reason": "无可用判断", "failed_checks": ["invented_check"], "reexcerpt_attempted": True}
+assert any("failed_checks:" in error for error in p.final_excerpt_review_errors(bad_drop, plain_input))
+assert not w.final_excerpt_review_is_filled(bad_drop, plain_input), "控制器与发布共用检查，不能先通过再在渲染拒绝"
 ambiguous_review = p.deterministic_semantic_keep(
     {
         **safe_semantic_input,
@@ -858,5 +893,23 @@ malformed_review.write_text('{"reviews": [', encoding="utf-8")
 malformed_payload = w.review_payload(malformed_review)
 assert w.binding_issue(malformed_payload, "wf-ledger", [ledger_input]).startswith("invalid_review_file:")
 
+
+# Compact decisions have exactly the same evidence checks as verbose ones.
+# Metadata is backfilled only when the submission still matches its input.
+compact_item = {**plain_input, "view_id": "compact::P01", "short_excerpt": False}
+compact_payload = {"_workflow": w.binding("wf-compact", [ledger_input]), "reviews": {
+    "compact::P01": {"decision": "keep", "evidence_candidate_index": 1, "reason": plain_review["reason"]},
+}}
+expanded = w.expand_compact_submission(compact_payload, "wf-compact", [ledger_input], {"compact::P01": compact_item}, final=True)
+assert w.final_excerpt_review_is_filled(expanded["reviews"]["compact::P01"], compact_item)
+assert "review_fingerprint" not in compact_payload["reviews"]["compact::P01"], "不得原地改写调用者的提交"
+stale_compact = {**compact_payload, "_workflow": {"workflow_id": "wf-compact", "input_sha256": "old"}}
+assert w.expand_compact_submission(stale_compact, "wf-compact", [ledger_input], {"compact::P01": compact_item}, final=True) is stale_compact
+blank_compact = {**compact_payload, "reviews": {"compact::P01": {"decision": "", "evidence_candidate_index": 1}}}
+blank_expanded = w.expand_compact_submission(blank_compact, "wf-compact", [ledger_input], {"compact::P01": compact_item}, final=True)
+assert not w.final_excerpt_review_is_filled(blank_expanded["reviews"]["compact::P01"], compact_item)
+exclude_compact = {"_workflow": w.binding("wf-compact", [ledger_input]), "reviews": [{"source_id": "s", "decision": "exclude", "evidence_candidate_index": 1}]}
+source_expanded = w.expand_compact_submission(exclude_compact, "wf-compact", [ledger_input], {"s": {"auto_decision": "exclude", "auto_reason": "只描述抽奖操作，没有节目评价"}})
+assert source_expanded["reviews"][0]["reason"] == "只描述抽奖操作，没有节目评价"
 
 print("PASS: issue-report regressions")

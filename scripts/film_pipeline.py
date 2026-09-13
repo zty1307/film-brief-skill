@@ -657,6 +657,7 @@ def deterministic_semantic_keep(input_item: dict, excerpt: str) -> dict | None:
         or not excerpt.endswith(AUTO_SEMANTIC_COMPLETE_END)
         or LEADING_FRAGMENT.search(excerpt)
         or AUTO_SEMANTIC_CONTRAST.search(excerpt)
+        or any(stance(match.group(1)) != "混合或中性" for match in re.finditer(r'[“「"]([^”」"]{1,80})[”」"]', excerpt))
     ):
         return None
     expected_stance = clean(input_item.get("cluster_stance"))
@@ -681,7 +682,8 @@ def deterministic_semantic_keep(input_item: dict, excerpt: str) -> dict | None:
         )
         if stance_supported:
             stance_candidates.append(str(index))
-        if segment_aspects and stance_supported:
+        if (any(term not in AMBIGUOUS_AUTO_ASPECT_TERMS for term in segment_aspects)
+                and stance_supported):
             joint_candidates.append(str(index))
     if not joint_candidates or not concrete_aspect_hits:
         return None
@@ -720,7 +722,7 @@ def short_excerpt_support_is_specific(excerpt: object, evidence: object) -> bool
 
 
 def stance_evidence_conflicts(expected: object, evidence: object) -> bool:
-    """Use deterministic polarity only as an opposite-stance safety veto."""
+    """Flag a lexical polarity conflict; this is not a veto of an explained AI judgment."""
     expected_value = clean(expected)
     inferred = stance(clean(evidence))
     if expected_value == "positive":
@@ -733,7 +735,7 @@ def stance_evidence_conflicts(expected: object, evidence: object) -> bool:
 
 
 def stance_evidence_supports(expected: object, evidence: object) -> bool:
-    """Require the cited sentence to actually express the cluster polarity."""
+    """Recognize common polarity wording for evidence suggestions and the narrow fast path."""
     expected_value = clean(expected)
     inferred = stance(clean(evidence))
     if expected_value == "positive":
@@ -769,6 +771,104 @@ def indexed_target_evidence(review: dict, input_item: dict) -> str:
     if isinstance(index, int) or (isinstance(index, str) and index.isdigit()):
         return clean((input_item.get("target_evidence_segments") or {}).get(str(index)))
     return ""
+
+
+def final_excerpt_review_errors(review: dict, item: dict, source: str | None = None) -> list[str]:
+    """One contract for chunk feedback AND publication; lexical votes are advisory.
+
+    Passing this checks the submitted evidence/decision contract, not the truth
+    of an AI judgment. Only genuinely read, item-specific judgments may be sent.
+    """
+    errors = []
+    decision = clean(review.get("decision"))
+    if clean(review.get("review_fingerprint")) != clean(item.get("review_fingerprint")):
+        errors.append("review_fingerprint: 当前摘录已变化；阅读当前 input_file 后重新审核本条")
+    if decision not in {"keep", "drop"}:
+        errors.append("decision: 阅读本条后填写 keep 或 drop")
+        return errors
+    excerpt = clean("".join(str(value) for value in (item.get("excerpt_segments") or {}).values()))
+    if decision == "drop":
+        if not clean(review.get("reason")):
+            errors.append("reason: 写明本条具体内容为何不可用，不能以未命中词表或通过校验为理由")
+        checks = review.get("failed_checks")
+        if not isinstance(checks, list) or not checks:
+            errors.append("failed_checks: 至少填写一项实际失败的语义检查")
+            checks = []
+        invalid = sorted({clean(value) for value in checks} - ALLOWED_DROP_FAILURE_CHECKS)
+        if invalid:
+            errors.append(f"failed_checks: 未知检查项 {invalid}；使用当前 contract 中的检查名")
+        if review.get("reexcerpt_attempted") is not True:
+            errors.append("reexcerpt_attempted: 回查本来源是否有可用替代片段后再确认 true")
+        if {"aspect", "stance", "cluster_claim"} & set(checks):
+            if review.get("reassignment_attempted") is not True or not clean(review.get("reassignment_reason")):
+                errors.append("reassignment_reason: 当前簇不合适不等于来源无用；尝试转簇并说明无法转簇的具体原因")
+        if "work_consistency" in checks:
+            evidence = clean(review.get("conflict_evidence"))
+            if not evidence or (source is not None and evidence not in source):
+                errors.append("conflict_evidence: 提供该来源 source_text 中说明跨作品冲突的逐字句段")
+        return errors
+
+    expected = clean(item.get("cluster_stance"))
+    reviewed = clean(review.get("stance"))
+    if reviewed not in ALLOWED_CLUSTER_STANCES or (expected and reviewed != expected):
+        errors.append("stance: 必须与当前簇一致；立场不同请转簇或重截，不能只改标签")
+    if review.get("self_contained") is not True:
+        errors.append("self_contained: 确认摘录独立可读、指代和转折完整后填写 true")
+
+    def evidence_for(field: str, *, target: bool = False, scope: str | None = None) -> str:
+        evidence = indexed_target_evidence(review, item) if target else indexed_excerpt_evidence(review, item, field)
+        if not evidence or evidence not in (excerpt if scope is None else scope):
+            errors.append(f"{field}: 候选编号无效或不在对应原文范围；优先选当前 input_file 的完整句段编号")
+        elif len(normalized(evidence)) < 4:
+            errors.append(f"{field}: 只有短词、名字或碎片不能证明观点；选包含实际陈述的完整句段，勿补写原文")
+        elif field in {"target_evidence", "work_consistency_evidence"} and any(
+            normalized(evidence) == normalized(value)
+            for value in list(item.get("target_anchor_terms") or []) + list(item.get("work_conflict_markers") or [])
+        ):
+            errors.append(f"{field}: 作品名或人名本身不能证明评价归属；选包含相关陈述的句段")
+        return evidence
+
+    aspect = evidence_for("aspect_evidence")
+    stance_text = evidence_for("stance_evidence")
+    warnings = []
+    if expected and stance_text and (stance_evidence_conflicts(expected, stance_text)
+                                    or not stance_evidence_supports(expected, stance_text)):
+        warnings.append("词表对立场存疑")
+    terms = [clean(value) for value in item.get("aspect_terms", []) if clean(value)]
+    if terms and not any(term in aspect for term in terms):
+        warnings.append("方面词未字面命中")
+    if item.get("display_operational_promotion_markers"):
+        errors.append("excerpt: 仍含购买/抽奖/关注/参与指令；先在 optional_excerpt_file 重截有效观点")
+    if item.get("irrelevant_leading_segment_indexes"):
+        errors.append("excerpt: 起始句与目标观点无关；先重截，不得用后句证据掩盖前句")
+    if item.get("target_review_required"):
+        if review.get("target_relation_passed") is not True:
+            errors.append("target_relation_passed: 核实目标锚点与评价属于同一作品后确认 true")
+        scope = " ".join(clean(value) for value in (item.get("target_evidence_segments") or {}).values())
+        target = evidence_for("target_evidence", target=True, scope=scope)
+        anchors = [clean(value) for value in item.get("target_anchor_terms", []) if clean(value)]
+        if anchors and not any(term in target for term in anchors):
+            errors.append("target_evidence: 选同时包含作品/角色锚点和相关陈述的目标证据句段")
+    if item.get("work_consistency_review_required"):
+        if review.get("work_consistency_passed") is not True:
+            errors.append("work_consistency_passed: 核实每句评价的作品归属后确认 true")
+        evidence_for("work_consistency_evidence", scope=clean(item.get("raw_excerpt")) or excerpt)
+        warnings.append("存在跨作品对比")
+    if item.get("short_excerpt") and not any(short_excerpt_support_is_specific(excerpt, value) for value in (aspect, stance_text)):
+        warnings.append("短摘录的具体依据不能由词表确认")
+    if item.get("promotion_markers"):
+        opinion = evidence_for("opinion_evidence")
+        if review.get("independent_opinion_passed") is not True:
+            errors.append("independent_opinion_passed: 确认实际评价独立于宣传操作后填写 true")
+        if not promotion_evidence_is_independent(opinion):
+            warnings.append("独立观点不能由词表确认")
+    if item.get("cluster_claim_review_required"):
+        if review.get("cluster_claim_passed") is not True:
+            errors.append("cluster_claim_passed: 核实片段直接支持簇标题的具体主张后填写 true")
+        evidence_for("cluster_claim_evidence")
+    if warnings and not clean(review.get("reason")):
+        errors.append("reason: " + "；".join(warnings) + "。允许语义复核纠正脚本；用一句话说明本条原文如何支持该作品、方面和立场，不要迎合词表或因此删样本")
+    return errors
 
 
 def safe_url(value: object) -> str:
@@ -1314,18 +1414,19 @@ def evaluate(row: dict, target: dict, config: dict) -> dict:
         {key: item[key] for key in ("start", "end", "text", "anchor_class", "strong_hits", "weak_hits", "comparison_hits")}
         for item in candidates
     ]
-    if needs_review and not review_candidates and head_target_review:
-        # 为“篇首已点明作品、后文判断距离较远”的边界项提供可定位的连续原文，
-        # 方便 AI/人工确认归属；该候选本身不自动改变排除决定。
-        end = min(len(text), 700)
+    if needs_review and not review_candidates and text:
+        # Even an uncertain source needs readable evidence. This fallback is
+        # context only: it must never change the source admission decision.
+        start = max(0, first_strong_position - 150) if strong_positions else 0
+        end = min(len(text), start + 700)
         review_candidates.append({
-            "start": 0,
+            "start": start,
             "end": end,
-            "text": text[:end],
-            "anchor_class": "strong_head_review",
-            "strong_hits": term_hits(text[:end], strong_terms),
-            "weak_hits": term_hits(text[:end], weak_terms),
-            "comparison_hits": term_hits(text[:end], comparison_terms),
+            "text": text[start:end],
+            "anchor_class": "fallback_context_only",
+            "strong_hits": term_hits(text[start:end], strong_terms),
+            "weak_hits": term_hits(text[start:end], weak_terms),
+            "comparison_hits": term_hits(text[start:end], comparison_terms),
         })
     return {
         "auto_decision": decision,
@@ -3719,7 +3820,7 @@ def validate_embedded_dataset(dataset: dict, source: Path, *, allow_legacy: bool
                             failures.append(f"短摘录未确认含有具体依据：{source} / {view_id}")
                         if not support_evidence or support_evidence not in excerpt:
                             failures.append(f"短摘录缺少逐字具体依据：{source} / {view_id}")
-                        elif not short_excerpt_support_is_specific(excerpt, support_evidence):
+                        elif not short_excerpt_support_is_specific(excerpt, support_evidence) and not clean((item.get("semanticReview") or {}).get("reason")):
                             failures.append(f"短摘录具体依据仍是泛泛态度：{source} / {view_id}")
                 if isinstance(length_review, dict):
                     if int(length_review.get("length", -1)) != excerpt_length:
@@ -4119,108 +4220,19 @@ def command_render(args: argparse.Namespace) -> None:
                     semantic_pending.append(semantic_input)
                     item_failures.append("缺少独立的最终摘录语义复核")
                 else:
-                    semantic_decision = clean(semantic.get("decision"))
-                    if clean(semantic.get("review_fingerprint")) != semantic_input["review_fingerprint"]:
-                        item_failures.append("最终摘录语义复核与当前条目指纹不一致")
-                    if semantic_decision not in {"keep", "drop"}:
-                        item_failures.append("最终摘录语义复核 decision 必须为 keep 或 drop")
-                    if semantic_decision == "keep":
-                        aspect_evidence = indexed_excerpt_evidence(semantic, semantic_input, "aspect_evidence")
-                        stance_evidence = indexed_excerpt_evidence(semantic, semantic_input, "stance_evidence")
-                        reviewed_stance = clean(semantic.get("stance"))
-                        if display_promotion_markers:
-                            item_failures.append("展示摘录仍含购买、抽奖、关注或参与指令；须重截为纯观点片段后再保留")
-                        if irrelevant_leading_indexes:
-                            item_failures.append(
-                                f"展示摘录第 {irrelevant_leading_indexes} 段为目标观点前的无关八卦；须从有效观点处重截"
-                            )
-                        if reviewed_stance != clean(definition["stance"]):
-                            item_failures.append(f"摘录立场 {reviewed_stance or '空'} 与观点簇立场不一致")
-                        if semantic.get("self_contained") is not True:
-                            item_failures.append("片段自足性未通过独立语义复核")
-                        for evidence, label in ((aspect_evidence, "方面证据"), (stance_evidence, "立场证据")):
-                            if not evidence or evidence not in excerpt:
-                                item_failures.append(f"{label}候选编号无效，且未提供最终摘录中的逐字证据")
-                        if stance_evidence and stance_evidence_conflicts(definition["stance"], stance_evidence):
-                            item_failures.append("立场证据自身呈现的立场与观点簇不一致")
-                        elif stance_evidence and not stance_evidence_supports(definition["stance"], stance_evidence):
-                            item_failures.append("立场证据没有实际表达观点簇要求的正面、客观或负面立场")
-                        if aspect_terms and not any(term in aspect_evidence for term in aspect_terms):
-                            item_failures.append("方面证据未命中该观点簇的任何具体方面词，需重截或重新归簇")
-                        if cluster_claim_review_required:
-                            claim_evidence = indexed_excerpt_evidence(semantic, semantic_input, "cluster_claim_evidence")
-                            if semantic.get("cluster_claim_passed") is not True:
-                                item_failures.append("宽泛路由词或少量观点簇须确认摘录能直接支持观点标题，无需分析者补充推理")
-                            if not claim_evidence or claim_evidence not in excerpt:
-                                item_failures.append("观点标题支持证据候选编号无效，且未提供最终摘录中的逐字证据")
-                        if target_review_required:
-                            target_evidence = indexed_target_evidence(semantic, semantic_input)
-                            target_scope = " ".join(target_segments.values())
-                            if semantic.get("target_relation_passed") is not True:
-                                item_failures.append("脚本无法确认目标作品，AI未确认目标锚点与当前观点属于同一语义关系")
-                            if not target_evidence or target_evidence not in target_scope:
-                                item_failures.append("目标证据候选编号无效，且未提供脚本候选中的逐字证据")
-                            elif not any(term in target_evidence for term in target_anchor_terms):
-                                item_failures.append("目标证据未包含作品名、节目名、演员或角色锚点")
-                        if work_conflict_markers:
-                            consistency_evidence = clean(semantic.get("work_consistency_evidence"))
-                            if semantic.get("work_consistency_passed") is not True:
-                                item_failures.append("摘录含对比作品，未确认目标作品内部信息一致性")
-                            if not consistency_evidence or consistency_evidence not in raw_excerpt:
-                                item_failures.append("作品一致性证据不是后台逐字原文片段中的子串")
-                        if promotion_markers:
-                            opinion_evidence = indexed_excerpt_evidence(semantic, semantic_input, "opinion_evidence")
-                            if semantic.get("independent_opinion_passed") is not True:
-                                item_failures.append("含促销操作词的摘录未确认存在独立观点")
-                            if not opinion_evidence or opinion_evidence not in excerpt:
-                                item_failures.append("含促销操作词的摘录缺少最终摘录中的逐字观点证据")
-                            elif not promotion_evidence_is_independent(opinion_evidence):
-                                item_failures.append("促销证据只有应援、送礼、抽奖或操作指令，没有独立评价或第三方事实观察")
-                        if short_excerpt:
-                            support_evidence = (
-                                aspect_evidence
-                                if short_excerpt_support_is_specific(excerpt, aspect_evidence)
-                                else stance_evidence
-                            )
-                            if not short_excerpt_support_is_specific(excerpt, support_evidence):
-                                item_failures.append("不足70字的摘录只有泛泛态度，具体依据未包含动作、台词、场景、数据或因果分析")
-                    elif semantic_decision == "drop" and not item_failures:
+                    item_failures.extend(final_excerpt_review_errors(semantic, semantic_input, body))
+                    if clean(semantic.get("decision")) == "drop" and not item_failures:
                         drop_reason = clean(semantic.get("reason"))
-                        if not drop_reason:
-                            item_failures.append("drop 缺少具体理由")
-                        failed_checks = semantic.get("failed_checks")
-                        if not isinstance(failed_checks, list) or not failed_checks:
-                            item_failures.append("drop 必须填写至少一项 failed_checks")
-                        else:
-                            invalid_checks = sorted({clean(value) for value in failed_checks} - ALLOWED_DROP_FAILURE_CHECKS)
-                            if invalid_checks:
-                                item_failures.append(f"drop 含未知 failed_checks：{invalid_checks}")
-                        if semantic.get("reexcerpt_attempted") is not True:
-                            item_failures.append("drop 前必须回看全文并确认 reexcerpt_attempted=true")
-                        if isinstance(failed_checks, list) and ({"aspect", "stance", "cluster_claim"} & set(failed_checks)):
-                            if semantic.get("reassignment_attempted") is not True:
-                                item_failures.append("方面或立场不匹配时，drop 前必须确认已尝试重新归簇")
-                            if not clean(semantic.get("reassignment_reason")):
-                                item_failures.append("方面或立场不匹配时，drop 必须说明为何无法转入其他现有簇或形成新簇")
-                        if isinstance(failed_checks, list) and "work_consistency" in failed_checks:
-                            conflict_evidence = clean(semantic.get("conflict_evidence"))
-                            if not conflict_evidence or conflict_evidence not in body:
-                                item_failures.append("作品信息冲突必须提供全文中的逐字 conflict_evidence")
-                        if not item_failures:
-                            reason_key = drop_reason_fingerprint(drop_reason)
-                            drop_counts[(batch, str(definition["id"]))] += 1
-                            semantic_rejected.append({
-                                "view_id": view_id,
-                                "source_id": row["id"],
-                                "cluster_id": str(definition["id"]),
-                                "reason": drop_reason,
-                                "reason_fingerprint": reason_key,
-                                "failed_checks": failed_checks,
-                                "reexcerpt_attempted": True,
-                                "reassignment_attempted": semantic.get("reassignment_attempted") is True,
-                                "reassignment_reason": clean(semantic.get("reassignment_reason")),
-                            })
-                            continue
+                        drop_counts[(batch, str(definition["id"]))] += 1
+                        semantic_rejected.append({
+                            "view_id": view_id, "source_id": row["id"],
+                            "cluster_id": str(definition["id"]), "reason": drop_reason,
+                            "reason_fingerprint": drop_reason_fingerprint(drop_reason),
+                            "failed_checks": semantic.get("failed_checks"), "reexcerpt_attempted": True,
+                            "reassignment_attempted": semantic.get("reassignment_attempted") is True,
+                            "reassignment_reason": clean(semantic.get("reassignment_reason")),
+                        })
+                        continue
                 aspect_evidence = ""
                 stance_evidence = ""
                 specific_support_evidence = ""
@@ -4370,10 +4382,11 @@ def command_render(args: argparse.Namespace) -> None:
     )
     write_json(run_dir / "final_excerpt_review_contract.json", {
         "scope": "current_period_final_excerpt_review_contract",
-        "instruction": "脚本已检查逐字位置、长度和清洁标记。AI按 excerpt_segments 顺序核对方面与立场。cluster_claim_review_required 时，摘录必须能直接放在 cluster_title 下且无需补充推理；泛群像、泛竞争、泛特效、名单和物料不能代替标题中的具体判断。target_review_required 时，须确认目标锚点和当前观点确属同一对象；作品只在标签、名单或综合盘点中出现不能通过。work_consistency_review_required 时，须确认方面证据评价的是目标作品。展示段含购买、抽奖、关注、参与指令或观点前无关八卦时，先重截，无法重截再 drop。",
+        "instruction": "脚本已检查逐字位置、长度和清洁标记。AI按 excerpt_segments 顺序核对方面与立场。cluster_claim_review_required 时，摘录支持 cluster_title 的核心评价方向即可，不必覆盖全部并列细节；泛群像、泛竞争、泛特效、名单和物料不能代替标题中的具体判断。target_review_required 时，须确认目标锚点和当前观点确属同一对象；作品只在标签、名单或综合盘点中出现不能通过。work_consistency_review_required 时，须确认方面证据评价的是目标作品。展示段含购买、抽奖、关注、参与指令或观点前无关八卦时，先重截，无法重截再 drop。",
         "allowed_decisions": ["keep", "drop"],
         "full_source_lookup_file": "retained_sources.jsonl",
         "evidence_scopes": {
+            "evidence_candidate_index": "excerpt_segments；控制器将普通 keep 的同一编号回填为方面和立场证据",
             "aspect_evidence_candidate_index": "excerpt_segments",
             "stance_evidence_candidate_index": "excerpt_segments",
             "opinion_evidence_candidate_index": "excerpt_segments",
