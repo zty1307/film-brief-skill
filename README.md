@@ -1,5 +1,11 @@
 # film-brief-cleaning Skill
 
+> **2026-09-17：r66 单窗口30分钟候选版已上传到本分支。**
+> 请阅读 [r66 安装与实测说明](candidates/r66/README.md)，或下载 [已验证的 Skill 安装包](dist/film-brief-cleaning-r66.zip)。
+> 新版源码完整位于 [`candidates/r66/film-brief-cleaning/`](candidates/r66/film-brief-cleaning/)，不是下方旧流程。
+> 四组同版单窗口实测总耗时为14分55秒至23分55秒；其中一例额外编辑超时回退，仍有语义质量限制，不能保证任意数据均在30分钟内完成。
+> 本分支保留根目录旧版文件作为对照，未替换 `main`。
+
 当前版本：v1.1.12。仓库包含完整的 Skill 说明、执行脚本、复核契约、媒体主体库和离线工作台模板，可独立安装和运行。
 
 用于清洗中文影视综艺舆情导出、发现当期观点簇、筛选可核验原文样本并生成离线 HTML 工作台的 Codex Skill。
