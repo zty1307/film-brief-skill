@@ -1,0 +1,100 @@
+{
+  "candidate": "r72",
+  "tested_on": "2026-09-21",
+  "status": "tested_candidate_for_human_material_selection",
+  "production_files": 22,
+  "archive": "../../dist/film-brief-cleaning-r72.zip",
+  "archive_sha256": "f390e94d0a69133b0e3683c1b92a95f59da41e800f5cc6afd4e42e25c0a89d40",
+  "raw_data_included": false,
+  "model_answers_included": false,
+  "files": [
+    {
+      "path": "agents/openai.yaml",
+      "sha256": "6d20f58668e1ede6c5370121c2cc4739999823e7878c65eea52cb10e518403fc"
+    },
+    {
+      "path": "assets/media_subject_registry.json",
+      "sha256": "f911ae3b114d7b383be05e4b60ec21e2006d49050979d3bc38355b8be69f8aa4"
+    },
+    {
+      "path": "README.md",
+      "sha256": "5b43c0df8bcd1d69708bf02112ae58864ea5ec0392101fe959f0c5ed77a38ce5"
+    },
+    {
+      "path": "references/audited-mode.md",
+      "sha256": "3dcb8476adf67c380c3758aef198d18bb01b720141aa671e3bb8a8f15d3b66a9"
+    },
+    {
+      "path": "references/contracts.md",
+      "sha256": "565b364b7aba81fbc6cab5e5aae96b8f5b1875e2201973b40ef44169d12a5f6c"
+    },
+    {
+      "path": "references/native-review.md",
+      "sha256": "259edd5c935289dd5374243b75f7284401153cff43be25b0ed15fdeed0d2b453"
+    },
+    {
+      "path": "references/review-rubric.md",
+      "sha256": "2f0be6660d31b48f585e721921f5e766c36747ba407abc0af294370347d1e6c5"
+    },
+    {
+      "path": "references/workflow.md",
+      "sha256": "970b0d1fe4edd0ed011bc324a76006567aa9b85294a613fb970a7513a23189ad"
+    },
+    {
+      "path": "requirements.txt",
+      "sha256": "886ea41f2c62469338cff8ffe090e2110346d90ef75f906bfb3b39da012ff32c"
+    },
+    {
+      "path": "scripts/check_links.py",
+      "sha256": "1e38ddb73e394e146b0fa659965fc35bb8e16c43ae9a746713a2e34d7acf7226"
+    },
+    {
+      "path": "scripts/display_editor.py",
+      "sha256": "e31d47fd8cddcebc4d7421f2102088f69a2c30fc38f94de4b8030046c5c6c67f"
+    },
+    {
+      "path": "scripts/extract_sources.py",
+      "sha256": "6085bb7f455c9ff07b15b079a754ce074acdd7eaa108a983acc0e41e0465bad3"
+    },
+    {
+      "path": "scripts/film_pipeline.py",
+      "sha256": "79dc0a69440fdb26f0158d1b37e81de4bdf2224bc73f5aad3cd8add6243db363"
+    },
+    {
+      "path": "scripts/film_workflow.py",
+      "sha256": "604ffd3d86249cee6be2d1aa8c832bc3eb0486adca29385c68be636fdf44e542"
+    },
+    {
+      "path": "scripts/final_sample_review.py",
+      "sha256": "9bf53898ec3d332e05984bb42f33aa11772b9647098889b7ba595b35327be91e"
+    },
+    {
+      "path": "scripts/native_assignment.py",
+      "sha256": "566324b75a5a3ab95a70324a0dde8a39e4f97d174a6a7ed0770f199d98233ab8"
+    },
+    {
+      "path": "scripts/native_review.py",
+      "sha256": "7dd59f5bea5e3da27045d472a92bb4158cd43edef8a7d1863a123e69b88e2a70"
+    },
+    {
+      "path": "scripts/rapid_film_workbench.py",
+      "sha256": "b01758d1b73f52fc9b45e2e5f7aca87a9dc31b827afc57eccc27002a63d7307f"
+    },
+    {
+      "path": "scripts/scoped_assignment_patch.py",
+      "sha256": "980aba17437a70fb3ff6fa316962feff2b1b7448cc65d76692cf57d0eade0695"
+    },
+    {
+      "path": "scripts/viewpoint_discovery.py",
+      "sha256": "5faf707fb04f74167d6e08db27a01d374ae1a835011151dcfec55dcd53ca1dfd"
+    },
+    {
+      "path": "SKILL.md",
+      "sha256": "30bd36a18ac6475822686c6f02507a43ff5005858970dcc4178355ef0eaad122"
+    },
+    {
+      "path": "templates/workbench.html",
+      "sha256": "16424e241931184065b71d49841b303be3c3f02852340bdc07e73ec4ffab3439"
+    }
+  ]
+}

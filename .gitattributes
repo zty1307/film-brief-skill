@@ -1,3 +1,5 @@
 # Preserve the exact bytes of the tested frozen production package.
 candidates/r66/film-brief-cleaning/** -text
 dist/*.zip binary
+
+candidates/r72/film-brief-cleaning/** -text whitespace=cr-at-eol,-blank-at-eof
