@@ -29,8 +29,9 @@ check_error(clusters, "演技/表演观点合计最多2组")
 check_error(clusters[:9] + [{"id": "O1", "stance": "objective", "performance_focus": False}],
             "正面观点至少10组")
 assert all(ACTING_TITLE_CUES.search(title) for title in (
-    "认可谭松韵表演层次细腻", "认可刘学义打戏力量感", "赞赏配角演技出彩"))
+    "认可谭松韵表演层次细腻", "认可演员打戏的投入与敬业", "赞赏配角演技出彩"))
 assert not ACTING_TITLE_CUES.search("赞赏反串造型带来视觉反差")
+assert not ACTING_TITLE_CUES.search("赞赏武打场面与实拍打戏的动作设计")
 
 sources = {
     "news": {"channel": "境内新闻", "data": {}},
