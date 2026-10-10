@@ -1,0 +1,7 @@
+interface:
+  display_name: "影视简报样本清洗"
+  short_description: "脚本预清洗，AI形成10—16个本期观点（正面至少10组、表演至多2组）并审每组最多10条"
+  default_prompt: "Use $film-brief-cleaning in one host conversation with a 30-minute budget. For raw Excel input, use scripts/final_sample_review.py prepare --discover-viewpoints: scripts preprocess, AI discovers 10-16 current-period report-style viewpoints (at least 10 positive, at most 2 positive/objective acting-performance viewpoints), scripts rank candidates by stance, and AI verifies up to 10 displayed excerpts per viewpoint. Do not split acting viewpoints by actor just to satisfy the positive minimum. Do not run full-source reviews or the old multistage controller. For an assigned input/answer packet, only review that packet; do not operate the full workflow. Preserve templates/workbench.html styling and interactions. Track all native workers and close every own persistent teammate after publication, including first-round members."
+
+policy:
+  allow_implicit_invocation: true
