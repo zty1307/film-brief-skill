@@ -19,6 +19,8 @@ sources = {
                          "《测试剧》把原著魔改得太远，重要人物的动机也变了，个人不太满意。", "正面"),
     "tv_praise": row("tv_praise", "微博", "测试剧幕后",
                      "《测试剧》演员为角色增重，演技爆改成功，表现一直不让人失望。", "负面"),
+    "tv_style": row("tv_style", "小红书", "测试剧观感",
+                    "《测试剧》节奏比较缓慢，需要沉下心慢慢品味，这种留白很有味道。", "负面"),
     "film_edit": row("film_edit", "小红书", "测试电影观后感",
                      "看完《测试电影》，我觉得剪辑太乱，关键情节衔接不上，观感很受影响。", "中性"),
     "variety_format": row("variety_format", "微博", "测试综艺讨论",
@@ -36,10 +38,14 @@ for target, expected, excluded in (
     ids = {item["source_id"] for item in group["candidates"]}
     assert expected in ids
     assert excluded not in ids
+    assert "tv_style" not in ids
     for item in group["candidates"]:
         text = sources[item["source_id"]]["data"][item["text_field"]]
         assert text[item["start"]:item["end"]]
 
 code = (SCRIPT / "social_criticism_probe.py").read_text(encoding="utf-8")
 assert all(name not in code for name in ("金色", "藏锋", "三波", "舞蹈痕迹"))
+unrelated = row("unrelated", "微博", "另一部剧评论",
+                "#电视剧另一部# 这个角色潜行于夜，片花配音让人失望，和角色气质不搭。", "负面")
+assert social_criticism_probe_group({"unrelated": unrelated}, ["潜行"]) is None
 print("r76 cross-format social recall checks PASS")

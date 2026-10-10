@@ -43,7 +43,8 @@ NEGATED_PRAISE = re.compile(
     r"|(?:没有|没|不)(?:让人|令人)失望"
     r"|(?:爆改|魔改)(?:成功|得好|后更好|变好|惊艳)"
 )
-DIRECT_COMPLAINT = re.compile(r"有点儿?水|不太满意|不满意|看不下去|坚持不下去|劝退|爆改|魔改")
+DIRECT_COMPLAINT = re.compile(r"有点儿?水|不太满意|不满意|看不下去|坚持不下去|劝退|爆改|魔改|节奏(?:有点|太|偏)慢")
+STYLE_APPRECIATION = re.compile(r"沉下心|慢慢品味|需要细品|值得细品|好在.{0,20}不至于")
 
 
 def _span_around_cue(text, cue_start):
@@ -62,6 +63,22 @@ def _span_around_cue(text, cue_start):
     return start, end
 
 
+def _target_grounded(data, body, terms):
+    """Require a work-title context, not an incidental substring in prose."""
+    text = text_field(data, "标题") + "\n" + body
+    for term in terms:
+        if not term:
+            continue
+        name = re.escape(term)
+        if re.search(rf"《\s*{name}\s*》|#[^#\s\n]{{0,12}}{name}[^#\s\n]{{0,12}}", text):
+            return True
+        if re.search(rf"(?:电视剧|剧集|电影|综艺|节目|剧版|本剧|这部剧|观剧|追剧|看完).{{0,8}}{name}", text):
+            return True
+        if re.search(rf"{name}.{{0,6}}(?:repo|观剧|剧评|影评|追剧|节目|电影|剧版|预告|开播|定档|首播)", text, re.I):
+            return True
+    return False
+
+
 def social_criticism_probe_group(sources, terms):
     """Expose at most six distinct original posts across criticism mechanisms.
 
@@ -78,7 +95,7 @@ def social_criticism_probe_group(sources, terms):
         if not field:
             continue
         body = str(data[field])
-        if not any(term and (term in body or term in text_field(data, "标题")) for term in terms):
+        if not _target_grounded(data, body, terms):
             continue
         screened = NEGATED_PRAISE.sub(lambda match: " " * len(match.group()), body)
         screened = re.sub(r"#[^#\n]{1,100}#", lambda match: " " * len(match.group()), screened)
@@ -91,6 +108,9 @@ def social_criticism_probe_group(sources, terms):
                 start, end = bounds
                 quote = body[start:end]
                 if not 24 <= len(quote) <= 360:
+                    continue
+                if (category == "叙事与节奏" and STYLE_APPRECIATION.search(quote)
+                        and not DIRECT_COMPLAINT.search(quote)):
                     continue
                 score = (80 + min(len(match.group()), 12) * 2
                          + (12 if any(term in quote for term in terms if term) else 0)
