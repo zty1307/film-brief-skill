@@ -20,6 +20,7 @@ TITLE_PATTERN = r"^(?:(?:观众|网友|网民|媒体|舆论|公众|影评人|评
 DISCOVERY_RULE += WORK_SCOPE_RULE
 DISCOVERY_RULE += " 负面观点最多3组：保留本期证据充分、机制不同的主要批评，近义批评合并，其他负面留在后台，不改成中性或正面凑数。负面候选在相关性接近时先看微博、小红书的真实评论，再看公众号，媒体报道后置；不新增采样、不把渠道当成观点真实性证明。正面观点至少10组，每组须有彼此不同的评价机制和本期原文证据（如叙事、表演、人物、视听、情感主题、制作或传播表现），不要把所有好评挤成一个大组。材料不足10组时如实报告不足，不拆近义组、不虚构、不把客观或负面改标正面，不反复重跑发现或突破30分钟预算。总数10—16。标题的每个实质分句都须有seed原文依据，并在title_evidence中逐条绑定seed编号；不能为了凑完整双句而补写传播影响、社会反响、因果或价值判断；没有第二层依据就只写有证据的完整判断。题材涉及某群体不等于该群体已讨论，创作意图不等于实现效果，来源自述不等于已证实事实。写答卷前在本次命名里检查标题所有分句，不新增审查轮。"
 DISCOVERY_RULE += " 确定负面观点前，先核对本输入social_review_ids所列微博、小红书摘录，不依赖rule_stance标签：逐条判断它是否明确批评本期剧集、演员或剧宣；剧宣、夸赞、事实描述、幕后玩笑和否定式好评不算批评。答卷social_negative_review须逐条记录判断与简短依据；真批评若有代表性、与其他批评机制不同，优先作为最多3个负面观点的候选，再用公众号/媒体线索核对；若未成组，说明证据不足、与其他组同义或代表性较弱等实际理由。不能为了社交渠道硬凑负面组，也不能因媒体数量多就跳过真实社交批评。社交核对与观点命名在同一次答卷完成，不新增模型轮次或原始样本。"
+DISCOVERY_RULE += " 社交评论里的具体批评即使与赞赏、表情符号同帖出现，也要按批评句本身判断；不得只因整帖偏正面或语气轻松就抹去明确的具体不满。负面组优先考虑观剧后的第一手具体批评，再考虑未播前的猜测和转述；最多3组时，推测性担忧不能挤掉机制独立且可直接引用的实际观剧批评。每条入组的社交批评必须与负面标题同向、同对象：例如‘节奏慢’不能作为‘节奏仓促/过快’的证据，某演员动作有舞蹈痕迹不能扩写成整部剧演技差；若两种说法相反须分开取舍，不得塞进同一标题。标题只概括最终可引用的核心批评，不为兼容媒体猜测而增写社交原话没有支持的分句。"
 
 ACTING_TITLE_CUES = re.compile(
     r'演技|表演|演绎|演员表现|角色诠释|眼神戏|微表情|'
@@ -38,6 +39,14 @@ def social_criticism_cue_score(quote):
     """Loose discovery hint only; the AI decides whether a post truly criticizes."""
     screened = POSITIVE_NEGATION_CUES.sub('', quote)
     return sum(len(pattern.findall(screened)) for pattern in SOCIAL_CRITICISM_CUES)
+
+
+def social_pacing_conflict(quote, title):
+    """Catch opposite pacing claims when a social seed is bound to a title."""
+    slow = r'节奏.{0,6}(?:慢|拖沓|缓慢|沉闷)'
+    fast = r'节奏.{0,6}(?:仓促|过快|太快|太赶|赶进度)'
+    return bool((re.search(slow, quote) and re.search(fast, title)) or
+                (re.search(fast, quote) and re.search(slow, title)))
 
 def title_error(title):
     if not isinstance(title,str) or not 12 <= len(title.strip()) <= 48 or not re.match(TITLE_PATTERN,title.strip()):
@@ -192,6 +201,12 @@ def apply_discovery(workspace, state, answer, sources, digest):
         raise ValueError('正面和客观的演技/表演观点合计最多2组；先按共同评价机制合并不同演员或角色，不得为满足正面10组而逐人拆分：' + ', '.join(str(group.get('id') or '') for group in acting_groups))
     excerpts = {item["excerpt_id"]: item for item in state["discovery_excerpts"]}
     social_negative_review = validate_social_negative_review(answer, excerpts, clusters)
+    for row in social_negative_review:
+        if row['decision'] != 'criticism' or not row['cluster_id']:
+            continue
+        group = next(group for group in clusters if group.get('id') == row['cluster_id'])
+        if social_pacing_conflict(excerpts[row['excerpt_id']]['excerpt'], str(group.get('title') or '')):
+            raise ValueError(f"{row['excerpt_id']}: 社交批评的节奏方向与{row['cluster_id']}标题相反；请改标题或取消该绑定，不得把慢说成仓促/快")
     # The model sees both excerpt and context. Accept either, but only after
     # reconstructing the supplied context from the same original source span.
     seed_texts = {}

@@ -6,7 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "candidates" / "r74" / "film-brief-cleaning" / "scripts"))
-from viewpoint_discovery import (representative_candidates, social_criticism_cue_score,
+from viewpoint_discovery import (representative_candidates, social_criticism_cue_score, social_pacing_conflict,
                                  validate_social_negative_review)  # noqa: E402
 
 
@@ -40,6 +40,8 @@ rejected([dict(valid[0], decision="not_criticism"), valid[1]], "不能作负面�
 
 assert social_criticism_cue_score("预告没让人失望，节奏不拖沓") == 0
 assert social_criticism_cue_score("我有点不太满意，动作有点僵硬") > 0
+assert social_pacing_conflict("剧集节奏有点慢", "担忧改编节奏仓促")
+assert not social_pacing_conflict("剧集节奏有点慢", "批评前两集节奏缓慢")
 sources = {
     "media": {"channel": "境内新闻", "data": {"text": "媒体大段评论"}},
     "praise": {"channel": "微博", "data": {"text": "预告没让人失望，节奏不拖沓"}},
