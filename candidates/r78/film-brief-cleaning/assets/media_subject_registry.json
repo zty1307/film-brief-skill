@@ -1,0 +1,889 @@
+{
+  "schema_version": 3,
+  "match_policy": "normalized_exact_alias_then_verified_first_party_domain",
+  "subjects": [
+    {
+      "id": "people_daily",
+      "canonical_name": "人民日报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "人民日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "人民日报客户端",
+          "account_type": "general_news"
+        },
+        {
+          "name": "人民日报评论",
+          "account_type": "commentary_vertical"
+        },
+        {
+          "name": "人民网",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "xinhua_news_agency",
+      "canonical_name": "新华通讯社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "新华社",
+          "account_type": "general_news"
+        },
+        {
+          "name": "新华网",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "china_media_group",
+      "canonical_name": "中央广播电视总台",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "中央广播电视总台",
+          "account_type": "general_news"
+        },
+        {
+          "name": "央视新闻",
+          "account_type": "general_news"
+        },
+        {
+          "name": "央视网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "央视文艺",
+          "account_type": "culture_vertical"
+        },
+        {
+          "name": "央广网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "中国之声",
+          "account_type": "radio_news"
+        },
+        {
+          "name": "央视一套",
+          "account_type": "television_vertical"
+        },
+        {
+          "name": "央视频",
+          "account_type": "video_platform"
+        },
+        {
+          "name": "央视网文娱",
+          "account_type": "culture_vertical"
+        },
+        {
+          "name": "央视影音",
+          "account_type": "video_platform"
+        },
+        {
+          "name": "中国电视报",
+          "account_type": "culture_vertical"
+        },
+        {
+          "name": "CCTV中国电视报",
+          "account_type": "culture_vertical"
+        }
+      ],
+      "domains": [],
+      "registry_group": "core"
+    },
+    {
+      "id": "china_news_service",
+      "canonical_name": "中国新闻社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "中国新闻社",
+          "account_type": "general_news"
+        },
+        {
+          "name": "中新社",
+          "account_type": "general_news"
+        },
+        {
+          "name": "中国新闻网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "中新网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "中新文娱",
+          "account_type": "culture_vertical"
+        }
+      ],
+      "domains": [],
+      "registry_group": "core"
+    },
+    {
+      "id": "china_daily",
+      "canonical_name": "中国日报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "中国日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "中国日报网",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "guangming_daily",
+      "canonical_name": "光明日报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "光明日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "光明网",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "economic_daily",
+      "canonical_name": "经济日报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "经济日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "中国经济网",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "china_youth_daily",
+      "canonical_name": "中国青年报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "中国青年报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "中国青年网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "中青网",
+          "account_type": "news_website"
+        }
+      ],
+      "domains": [
+        {
+          "host": "youth.cn",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "workers_daily",
+      "canonical_name": "工人日报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "工人日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "中工网",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "legal_daily",
+      "canonical_name": "法治日报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "法治日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "法治网",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "global_times",
+      "canonical_name": "环球时报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "环球时报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "环球网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "环球时报文娱",
+          "account_type": "culture_vertical"
+        }
+      ],
+      "domains": [],
+      "registry_group": "core"
+    },
+    {
+      "id": "china_org_cn",
+      "canonical_name": "中国互联网新闻中心",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "中国网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "中国网娱乐",
+          "account_type": "culture_vertical"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "china_culture_daily",
+      "canonical_name": "中国文化报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "中国文化报",
+          "account_type": "professional_news"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "china_film_news",
+      "canonical_name": "中国电影报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "中国电影报",
+          "account_type": "professional_news"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "beijing_daily_group",
+      "canonical_name": "北京日报报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "北京日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "北京晚报",
+          "account_type": "general_news"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "beijing_radio_television_station",
+      "canonical_name": "北京广播电视台",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "北京广播电视台",
+          "account_type": "broadcast_news"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "beijing_news",
+      "canonical_name": "新京报社",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "新京报",
+          "account_type": "general_news"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "shanghai_united_media_group",
+      "canonical_name": "上海报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "解放日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "文汇报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "新民晚报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "澎湃新闻",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "southern_media_group",
+      "canonical_name": "南方报业传媒集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "南方日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "南方都市报",
+          "account_type": "general_news"
+        }
+      ],
+      "domains": [
+        {
+          "host": "infzm.com",
+          "account_type": "general_news"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "zhejiang_daily_group",
+      "canonical_name": "浙江日报报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "浙江日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "潮新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "sichuan_daily_group",
+      "canonical_name": "四川日报报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "四川日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "封面新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "domains": [
+        {
+          "host": "scol.com.cn",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "great_wall_new_media_group",
+      "canonical_name": "长城新媒体集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "长城网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "河北长城网",
+          "account_type": "news_website"
+        }
+      ],
+      "domains": [],
+      "registry_group": "core"
+    },
+    {
+      "id": "jinan_daily_group",
+      "canonical_name": "济南日报报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "济南时报",
+          "account_type": "local_news"
+        },
+        {
+          "name": "新黄河",
+          "account_type": "news_client"
+        }
+      ],
+      "domains": [
+        {
+          "host": "jinantimes.com.cn",
+          "account_type": "local_news"
+        }
+      ],
+      "registry_group": "core"
+    },
+    {
+      "id": "future_net",
+      "canonical_name": "未来网",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "未来网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "燃新闻",
+          "account_type": "video_vertical"
+        }
+      ],
+      "domains": [
+        {
+          "host": "k618.cn",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "china_womens_news",
+      "canonical_name": "中国妇女报社",
+      "tier": "central_mainstream",
+      "aliases": [
+        {
+          "name": "中国妇女报",
+          "account_type": "professional_news"
+        },
+        {
+          "name": "中国妇女网",
+          "account_type": "news_website"
+        }
+      ],
+      "domains": [
+        {
+          "host": "cnwomen.com.cn",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "beijing_youth_daily",
+      "canonical_name": "北京青年报社",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "北京青年报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "北青网",
+          "account_type": "news_website"
+        }
+      ],
+      "domains": [
+        {
+          "host": "ynet.com",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "tianjin_haihe_media_center",
+      "canonical_name": "天津海河传媒中心",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "北方网",
+          "account_type": "news_website"
+        },
+        {
+          "name": "今晚报",
+          "account_type": "local_news"
+        }
+      ],
+      "domains": [
+        {
+          "host": "enorth.com.cn",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "zhejiang_radio_television_group",
+      "canonical_name": "浙江广播电视集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "中国蓝新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "xiaoxiang_morning_post",
+      "canonical_name": "潇湘晨报",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "潇湘晨报",
+          "account_type": "local_news"
+        },
+        {
+          "name": "潇湘晨报·晨视频",
+          "account_type": "video_vertical"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "hebei_daily_group",
+      "canonical_name": "河北日报报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "纵览新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "chongqing_three_gorges_media_center",
+      "canonical_name": "重庆三峡融媒体中心",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "三峡融媒",
+          "account_type": "local_news"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "anhui_daily_group",
+      "canonical_name": "安徽日报报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "大皖新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "henan_radio_television_station",
+      "canonical_name": "河南广播电视台",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "大象新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "heilongjiang_radio_television_station",
+      "canonical_name": "黑龙江广播电视台",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "极光新闻",
+          "account_type": "news_client"
+        },
+        {
+          "name": "新闻夜航",
+          "account_type": "program_vertical"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "jiangxi_daily_group",
+      "canonical_name": "江西日报社",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "江南都市报",
+          "account_type": "local_news"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "shanghai_radio_television_station",
+      "canonical_name": "上海广播电视台",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "看看新闻Knews",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "chengdu_media_group",
+      "canonical_name": "成都传媒集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "成都商报",
+          "account_type": "local_news"
+        },
+        {
+          "name": "成都商报谈资",
+          "account_type": "culture_vertical"
+        },
+        {
+          "name": "红星新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "jiangsu_broadcasting_corporation",
+      "canonical_name": "江苏省广播电视总台",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "荔枝新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "changsha_evening_news",
+      "canonical_name": "长沙晚报社",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "长沙晚报",
+          "account_type": "local_news"
+        },
+        {
+          "name": "长沙晚报掌上长沙",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "jiangxi_radio_television_station",
+      "canonical_name": "江西广播电视台",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "今视频长天新闻",
+          "account_type": "program_vertical"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "liaoning_daily_group",
+      "canonical_name": "辽宁报刊传媒集团（辽宁日报社）",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "半岛晨报",
+          "account_type": "local_news"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "dazhong_daily_group",
+      "canonical_name": "大众报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "大众日报",
+          "account_type": "general_news"
+        },
+        {
+          "name": "大众新闻-大众日报",
+          "account_type": "news_client"
+        },
+        {
+          "name": "半岛都市报",
+          "account_type": "local_news"
+        },
+        {
+          "name": "齐鲁壹点",
+          "account_type": "news_client"
+        }
+      ],
+      "domains": [
+        {
+          "host": "ql1d.com",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "harbin_daily_group",
+      "canonical_name": "哈尔滨日报报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "哈尔滨日报",
+          "account_type": "local_news"
+        },
+        {
+          "name": "新晚报",
+          "account_type": "local_news"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "huashang_daily",
+      "canonical_name": "华商报社",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "大风新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "xinhua_daily_media_group",
+      "canonical_name": "新华报业传媒集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "扬子晚报",
+          "account_type": "local_news"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "xinjiang_radio_television_station",
+      "canonical_name": "新疆广播电视台",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "新疆广播电视台",
+          "account_type": "broadcast_news"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "chongqing_daily_group",
+      "canonical_name": "重庆日报报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "新重庆-重庆日报",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "hubei_daily_media_group",
+      "canonical_name": "湖北日报传媒集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "极目新闻",
+          "account_type": "news_client"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "qingdao_daily_group",
+      "canonical_name": "青岛日报报业集团",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "青岛新闻网",
+          "account_type": "news_website"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "shaanxi_science_technology_news",
+      "canonical_name": "陕西科技报社",
+      "tier": "major_mainstream",
+      "aliases": [
+        {
+          "name": "逐光新闻",
+          "account_type": "professional_vertical"
+        }
+      ],
+      "registry_group": "verified_extension"
+    },
+    {
+      "id": "variety_news",
+      "canonical_name": "《综艺报》报社有限公司",
+      "tier": "central_mainstream",
+      "registry_group": "core",
+      "aliases": [
+        {
+          "name": "综艺报",
+          "account_type": "culture_vertical"
+        },
+        {
+          "name": "综艺报社",
+          "account_type": "culture_vertical"
+        }
+      ]
+    }
+  ],
+  "registry_policy": {
+    "core": "精简预置：中央重点媒体、影视文化专业媒体及少量高频地方主流媒体",
+    "verified_extension": "仅在真实数据中遇到后，由AI研判并核验官方归属，再加入识别库",
+    "unknown": "库外名称不得仅凭含有新闻、日报、电视台等字样自动认定"
+  }
+}
