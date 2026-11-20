@@ -1,0 +1,53 @@
+{
+  "canvas": [
+    865,
+    520
+  ],
+  "dpi": 150,
+  "template_image": "sentiment-template.png",
+  "word_extent_emu": [
+    5273675,
+    3169920
+  ],
+  "center": [
+    435,
+    284
+  ],
+  "radii": [
+    167,
+    118,
+    67
+  ],
+  "start_angle": 55,
+  "colors": [
+    "#003366",
+    "#0099cc",
+    "#66cccc"
+  ],
+  "title_font": "msyhbd.ttc",
+  "label_font": "msyh.ttc",
+  "labels": {
+    "positive": {
+      "text": "积极正面",
+      "x": 98,
+      "swatch_center_y": 212.5,
+      "max_width": 174,
+      "clear_box": [80, 187, 267, 249]
+    },
+    "neutral": {
+      "text": "客观中立",
+      "x": 656,
+      "swatch_center_y": 228,
+      "max_width": 185,
+      "clear_box": [635, 198, 837, 260]
+    },
+    "negative": {
+      "text": "消极负面",
+      "x": 606,
+      "swatch_center_y": 409.5,
+      "max_width": 215,
+      "clear_box": [590, 375, 814, 442]
+    }
+  },
+  "note": "Style geometry only. All titles, dates, values and shapes are rendered from current inputs; no report image reuse."
+}

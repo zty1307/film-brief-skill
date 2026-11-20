@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "template_image": "trend-template.png",
+  "canvas": [
+    856,
+    532
+  ],
+  "dpi": 150,
+  "plot": {
+    "left": 115.3,
+    "right": 839.1,
+    "top": 126.1,
+    "bottom": 445.3,
+    "category_half_slot": true
+  },
+  "grid_intervals": 5,
+  "curve_color": "#003366",
+  "line_width": 1.65,
+  "marker_radius": 6.2,
+  "point_markers": [
+    "first",
+    "last"
+  ],
+  "value_labels": [
+    "first",
+    "peak"
+  ],
+  "title": {
+    "x": 428,
+    "y": 34,
+    "size": 37.5,
+    "font": "msyhbd.ttc"
+  },
+  "subtitle": {
+    "x": 428,
+    "y": 81,
+    "size": 26,
+    "font": "msyhbd.ttc"
+  },
+  "axis": {
+    "x": 95,
+    "size": 22,
+    "font": "arial.ttf",
+    "thousands_separator": false
+  },
+  "date": {
+    "y": 475,
+    "size": 21,
+    "font": "msyh.ttc"
+  },
+  "value": {
+    "size": 27,
+    "font": "arial.ttf",
+    "offset_y": -29,
+    "first_offset_x": -13
+  },
+  "legend": {
+    "preserve_reference_pixels": true,
+    "line": [
+      386,
+      426,
+      512
+    ],
+    "label": "总量"
+  },
+  "note": "Style geometry only. All titles, dates, values and shapes are rendered from current inputs; no report image reuse.",
+  "word_extent_emu": [
+    5218628,
+    3243353
+  ]
+}
