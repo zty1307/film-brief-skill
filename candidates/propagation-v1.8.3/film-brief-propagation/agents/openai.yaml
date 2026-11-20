@@ -1,0 +1,7 @@
+interface:
+
+  display_name: "影视简报传播特征"
+
+  short_description: "基于Excel和观点稿生成影视简报传播特征Word，节点事件通过公开搜索获取"
+
+  default_prompt: "使用 $film-brief-propagation，根据本期热度表、上期趋势、微博热搜表和审定观点稿生成总体传播特征。"

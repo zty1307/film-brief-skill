@@ -1,0 +1,4 @@
+openpyxl
+Pillow
+python-docx
+docxcompose>=2.2,<3
