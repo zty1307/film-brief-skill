@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eef3f7;color:#172b43;font:16px/1.85 'Microsoft YaHei','Noto Sans CJK SC',sans-serif}main{max-width:1080px;margin:auto;padding:32px 22px 60px}header{margin:0 0 26px}h1{font-size:28px;margin:0 0 5px}h2{font-size:22px;margin:0 0 15px}h3{font-size:19px;margin:20px 0 12px}p{margin:12px 0}.muted{color:#53677e;font-size:14px}.paper{padding:32px 38px;border:1px solid #dce3eb;border-radius:12px;background:white;margin-bottom:24px}.article p{text-indent:2em}.article h2{font-size:21px}svg{max-width:100%;height:auto;display:block;margin:18px auto}.notes{padding:20px 28px;border:1px solid #ddcfaa;background:#fffaf0;margin-bottom:24px}.notes h2{font-size:18px}.notes li{margin:6px 0}.scroll{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.65}th,td{border-bottom:1px solid #dce3eb;padding:10px;text-align:left;vertical-align:top}th{background:#f1f5f9;white-space:nowrap}td{min-width:80px}td:nth-child(2){min-width:190px}details{margin:18px 0}summary{font-weight:600;cursor:pointer}.sources{font-size:13px;overflow-wrap:anywhere}.sources li{margin-bottom:10px}#opinions{font-size:14px}.badge{font-size:14px;font-weight:normal;color:#775a20}@media(max-width:680px){main{padding:20px 12px}.paper{padding:22px 18px}h1{font-size:24px}}@media print{body{background:white}main{padding:0}.paper{border:0;padding:0}header,.audit{display:none}.notes{background:white;border:0;padding:0}svg{max-height:340px}.article{font-size:14px}}
+</style>
+<main>
+<header><h1>{{TITLE}}</h1><p class="muted">传播统计截至 {{CUTOFF}} · {{STATUS}}</p></header>
+<section class="paper article">
+<h2>{{HEADLINE}}</h2>
+{{TREND_CHART}}
+{{PARAGRAPHS}}
+{{SENTIMENT_CHART}}
+{{SENTIMENT_PARAGRAPH}}
+</section>
+<section class="notes"><h2>核对说明</h2><ul>{{NOTES}}</ul></section>
+<section class="paper audit"><h2>计算与取证明细</h2><p class="muted">微博阅读量快照：{{TOPIC_SNAPSHOT}}。以下记录供复核；不主动加载任何外部页面。</p>
+<details><summary>趋势更新记录</summary><div class="scroll"><table><thead><tr><th>日期</th><th>上期值</th><th>采用值</th><th>操作</th><th>来源角色</th><th>来源位置</th></tr></thead><tbody>{{TREND_ROWS}}</tbody></table></div></details>
+<details><summary>微博热搜榜话题取舍</summary><div class="scroll"><table><thead><tr><th>原行号</th><th>话题</th><th>阅读量 万</th><th>取舍</th><th>依据</th><th>最近上榜</th><th>时间提示</th></tr></thead><tbody>{{TOPIC_ROWS}}</tbody></table></div></details>
+<details><summary>节点依据</summary>{{NODE_NOTES}}</details>
+<details><summary>情感比例依据与观点稿</summary>{{SENTIMENT_BASIS}}<div id="opinions">{{OPINIONS}}</div></details>
+<details><summary>输入来源</summary><ul class="sources">{{SOURCES}}</ul></details>
+</section>
+</main>
+<script type="application/json" id="report-data">{{DATA}}</script>
+</html>
