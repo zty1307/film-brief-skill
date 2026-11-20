@@ -1,0 +1,68 @@
+{
+  "canvas": [
+    865,
+    520
+  ],
+  "dpi": 150,
+  "template_image": "sentiment-template.png",
+  "word_extent_emu": [
+    5273675,
+    3169920
+  ],
+  "center": [
+    435,
+    284
+  ],
+  "radii": [
+    167,
+    118,
+    67
+  ],
+  "start_angle": 55,
+  "colors": [
+    "#003366",
+    "#0099cc",
+    "#66cccc"
+  ],
+  "title_font": "msyhbd.ttc",
+  "label_font": "msyh.ttc",
+  "labels": {
+    "positive": {
+      "position": [
+        102,
+        232
+      ],
+      "number_box": [
+        208,
+        213,
+        267,
+        246
+      ]
+    },
+    "neutral": {
+      "position": [
+        657,
+        232
+      ],
+      "number_box": [
+        761,
+        213,
+        831,
+        246
+      ]
+    },
+    "negative": {
+      "position": [
+        608,
+        411
+      ],
+      "number_box": [
+        713,
+        392,
+        778,
+        428
+      ]
+    }
+  },
+  "note": "Style geometry only. All titles, dates, values and shapes are rendered from current inputs; no report image reuse."
+}
