@@ -1,0 +1,7 @@
+interface:
+  display_name: "影视样本清洗与观点写稿"
+  short_description: "清洗影视样本生成可勾选工作台，用户选择人工或自动选材后接续写稿并生成Word"
+  default_prompt: "使用 $film-brief-cleaning 根据原表生成观点工作台；若提供的是人工导出的写稿选材文件，则只按选中的观点和样本生成舆论观点Word。"
+
+policy:
+  allow_implicit_invocation: true
