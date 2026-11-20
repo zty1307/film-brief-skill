@@ -1,0 +1,11 @@
+# 影视观点聚类与写稿 Skill r229
+
+- [下载安装包](../../dist/film-brief-cleaning-r229.zip?raw=1)
+- [WorkBuddy 使用说明](film-brief-cleaning/README.md)
+- [完整 Skill 文件](film-brief-cleaning/)
+
+解压后，在 WorkBuddy 中加载完整的 `film-brief-cleaning` 文件夹。提供本期 Excel 和作品名，先生成已审观点工作台，再选择人工选材或自动选材写稿。需要跨日对照时，在聚类前一并提供同一作品前几天已交付的 Word。
+
+图表主要条目与最终正文观点一一对应。图左标签由对应段首句缩写，保留原评价动词和核心判断。图从上到下遵循最终正文段落顺序，“一是”对应第一条，“二是”对应第二条。批评跟随其正文位置，“其他”固定在最后。Word 中附上正文实际引用样本的原文链接。
+
+本次图表规则用《尚公主》24 日的 DeepSeek V4.1 Flash 和 GLM 5.3 Flash 两份既有自动稿验证，Word 中的图表显示和正文对应关系均已核对。
